@@ -20,6 +20,13 @@ check_me = "check_me.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

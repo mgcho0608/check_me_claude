@@ -175,7 +175,7 @@ class ScenarioMode:
                         "guard_functions_found": list(callees & check_names),
                     },
                     "confidence": "low",
-                    "claim": "structurally identified candidate — not execution-path verified",
+                    "claim": "structurally identified candidate",
                     "profile_id": self.profile_id,
                 }
             )

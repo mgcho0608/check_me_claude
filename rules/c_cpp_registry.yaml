@@ -1,0 +1,110 @@
+# check_me C/C++ 보안 규칙 레지스트리
+# source: 위험 데이터/상태가 시작되는 함수
+# sink: 위험 지점 (버퍼 쓰기, 명령 실행, 권한 있는 동작)
+# sanitizers: 중간 검증 함수
+
+rules:
+  # ──────────────────────────────────────────────
+  # Buffer / Memory safety
+  # ──────────────────────────────────────────────
+  - id: BUFFER_OVERFLOW_RISK
+    description: Unbounded copy/write to fixed buffer
+    sources:
+      - gets
+      - fgets
+      - read
+      - recv
+      - recvfrom
+    sinks:
+      - strcpy
+      - strcat
+      - sprintf
+      - memcpy
+      - memmove
+    sanitizers:
+      - strncpy
+      - strncat
+      - snprintf
+      - memcpy_s
+
+  # ──────────────────────────────────────────────
+  # Command injection
+  # ──────────────────────────────────────────────
+  - id: COMMAND_INJECTION_RISK
+    description: User-controlled data flows into shell execution
+    sources:
+      - getenv
+      - fgets
+      - recv
+      - read
+    sinks:
+      - system
+      - popen
+      - execve
+      - execl
+      - execlp
+    sanitizers:
+      - sanitize_input
+      - validate_command
+      - escape_shell
+
+  # ──────────────────────────────────────────────
+  # Format string
+  # ──────────────────────────────────────────────
+  - id: FORMAT_STRING_RISK
+    description: Uncontrolled format string
+    sources:
+      - fgets
+      - gets
+      - recv
+    sinks:
+      - printf
+      - fprintf
+      - sprintf
+      - syslog
+    sanitizers:
+      - validate_format
+      - sanitize_input
+
+  # ──────────────────────────────────────────────
+  # Update / Install integrity (secure_update_install_integrity)
+  # ──────────────────────────────────────────────
+  - id: UPDATE_WITHOUT_VERIFICATION
+    description: Firmware/software install without authenticity check
+    sources:
+      - receive_package
+      - download_firmware
+      - fetch_update
+      - read_package
+    sinks:
+      - install_firmware
+      - write_firmware
+      - flash_image
+      - activate_package
+      - apply_update
+    sanitizers:
+      - verify_signature
+      - check_integrity
+      - validate_hash
+      - authenticate_package
+
+  # ──────────────────────────────────────────────
+  # Auth / Session (auth_session_replay_state)
+  # ──────────────────────────────────────────────
+  - id: PRIVILEGED_WITHOUT_AUTH
+    description: Privileged operation without verified auth state
+    sources:
+      - get_session
+      - load_session
+      - restore_state
+    sinks:
+      - admin_action
+      - delete_user
+      - grant_permission
+      - elevate_privilege
+      - write_config
+    sanitizers:
+      - check_authenticated
+      - verify_session
+      - validate_token
+      - require_auth
