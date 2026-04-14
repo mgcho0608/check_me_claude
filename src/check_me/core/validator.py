@@ -10,6 +10,7 @@ REQUIRED_SHARED_ARTIFACTS = [
     "symbols.json",
     "call_graph.json",
     "function_summaries.json",
+    "primitives.json",
     "stats.json",
 ]
 
