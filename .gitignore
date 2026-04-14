@@ -1,0 +1,24 @@
+# 환경 설정 (절대 커밋 금지)
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# check_me 출력 아티팩트
+*.json
+!rules/**/*.json
+!tests/**/*.json
+
+# 에디터
+.vscode/
+.idea/
+*.swp
