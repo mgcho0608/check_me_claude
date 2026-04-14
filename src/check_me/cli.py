@@ -9,9 +9,11 @@ import click
 
 from check_me.cli_commands import (
     cmd_index,
+    cmd_interpret,
     cmd_list_profiles,
     cmd_model,
     cmd_security_model,
+    cmd_spec_check,
     cmd_stats,
     cmd_validate,
 )
@@ -29,3 +31,9 @@ main.add_command(cmd_model.model)
 main.add_command(cmd_stats.stats)
 main.add_command(cmd_validate.validate)
 main.add_command(cmd_list_profiles.list_profiles, name="list-profiles")
+main.add_command(cmd_interpret.interpret)
+main.add_command(cmd_spec_check.spec_check, name="spec-check")
+
+
+if __name__ == "__main__":
+    main()

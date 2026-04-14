@@ -37,28 +37,8 @@ class LLMClient:
         )
         return self._client
 
-    def interpret_candidate(self, candidate: dict) -> str:
-        """
-        후보를 LLM에게 해석 요청한다.
-        LLM은 탐지기가 아니라 해석기다 — 후보의 구조적 의미를 설명한다.
-        """
-        if not self.is_available():
-            return "[LLM disabled — set CHECK_ME_LLM_ENABLED=true and configure .env]"
-
-        prompt = self._build_interpretation_prompt(candidate)
-        return self._call(prompt)
-
-    def _build_interpretation_prompt(self, candidate: dict) -> str:
-        return (
-            f"You are a security analysis assistant.\n"
-            f"The following is a structural security candidate (NOT a confirmed vulnerability).\n"
-            f"Interpret its structural significance without overstating certainty.\n\n"
-            f"Candidate:\n{candidate}\n\n"
-            f"Provide a concise structural interpretation. "
-            f"Do not claim it is exploitable or a proven vulnerability."
-        )
-
     def _call(self, prompt: str) -> str:
+        """단일 user 메시지로 LLM 호출."""
         client = self._get_client()
         payload = {
             "model": self.config.model,
@@ -66,5 +46,18 @@ class LLMClient:
         }
         response = client.post("/chat/completions", json=payload)
         response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
+        return response.json()["choices"][0]["message"]["content"]
+
+    def _call_with_system(self, system: str, user: str) -> str:
+        """system + user 메시지로 LLM 호출."""
+        client = self._get_client()
+        payload = {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        response = client.post("/chat/completions", json=payload)
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]

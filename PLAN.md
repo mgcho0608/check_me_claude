@@ -522,18 +522,50 @@ AI Agent는 앞으로 작업할 때 아래를 반드시 따른다.
 
 ---
 
-# 16. 앞으로의 우선순위
+# 16. 구현 상태 및 다음 우선순위
 
-현재 우선순위는 다음과 같다.
+## 16.1 구현 완료 항목 (v0.1.0)
 
-1. CLI-first consistency
-2. profile-driven scenario execution 안정화
-3. target scenario pack 강화
-4. code mode refinement (필요 시)
-5. deeper structural reasoning
-6. 그 다음에야 LLM interpretation layer
+1. **CLI-first consistency** — 완료
+   - `check_me index / security-model / model / stats / validate / list-profiles / interpret / spec-check`
+   - 83개 테스트 통과 (E2E CLI 포함)
 
-즉, **다음 큰 점프는 LLM이 아니라 더 강한 deterministic substrate**다.
+2. **profile-driven scenario execution 안정화** — 완료
+   - 5개 profile (stable 2, experimental 3)
+   - RESULT_NOT_ENFORCED, PRIVILEGED_ACTION_WITHOUT_REQUIRED_STATE 등 15개 candidate family
+
+3. **target scenario pack 강화** — 완료
+   - update_integrity, auth_session, buffer_safety C/C++ fixture
+   - rules/c_cpp_registry.yaml (5개 rule, source/sink/sanitizer 매핑)
+
+4. **code mode refinement** — 완료
+   - BFS source→sink path tracing (실제 경로 기록)
+   - sanitizer-on-path 탐지 → SANITIZER_AFFECTED
+   - enforcement link 존재 시 confidence 보정
+
+5. **deeper structural reasoning** — 완료
+   - `core/primitives.py`: result-use links, enforcement links, state lifecycle, decision input hints
+   - 함수 본문 brace-matching 추출
+   - primitives.json shared artifact
+
+6. **LLM interpretation layer** — 완료 (stub + 실 연동 준비)
+   - `check_me interpret` CLI subcommand
+   - LLM disabled 시 placeholder (graceful degradation)
+   - 사내 서버 연동: .env의 CHECK_ME_LLM_* 변수로 설정
+   - system prompt: interpreter 역할 명시, forbidden claim 방지
+
+## 16.2 다음 심화 방향
+
+아래는 현재 구현 위에서 선택적으로 강화할 수 있는 방향이다.
+우선순위는 실제 분석 대상 코드베이스 규모와 사용 패턴에 따라 결정한다.
+
+- **points-to / alias-lite**: indirect call boundary 정밀화
+- **clang_json parser backend**: heuristic regex 대신 실제 AST 활용
+- **stronger propagation summaries**: inter-procedural summary 캐싱
+- **LLM triage integration**: interpret 결과를 ACTIVE candidate 우선순위화에 활용
+- **checker synthesis**: profile + candidate → 검사 코드 자동 생성 (LLM)
+
+즉, **현재 deterministic substrate는 충분히 구축됐으며, 이제 실제 코드베이스 적용 및 LLM 연동 활성화 단계**다.
 
 ---
 
@@ -553,5 +585,6 @@ AI Agent는 앞으로 작업할 때 아래를 반드시 따른다.
 
 - Code Mode는 코드 중심 구조 후보를 생성한다.
 - Scenario Mode는 domain profile 기반 보안 명세 위반 후보를 생성한다.
-- LLM은 나중에 해석기로 붙는다.
-- 지금 가장 중요한 것은 강한 deterministic substrate와 일관된 CLI 운영이다.
+- LLM은 `check_me interpret`를 통해 해석기로 동작한다 (탐지기 아님).
+- 사내 서버 LLM은 .env의 CHECK_ME_LLM_* 변수로 활성화한다.
+- deterministic substrate가 구축됐으며, 실제 코드베이스 적용 단계다.
