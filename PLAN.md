@@ -1,590 +1,330 @@
-# check_me PLAN
+# Aegis Inspect — PLAN
 
-이 문서는 `check_me`의 **설계 기준서이자 에이전트 작업 기준서**다.
-앞으로 AI Agent는 이 문서를 최우선으로 읽고 작업해야 한다.
+이 문서는 Aegis Inspect의 **설계 기준서이자 에이전트 작업 기준서**다.
+AI Agent는 이 문서를 최우선으로 읽고 작업한다.
 
 원칙:
 - README는 짧게 유지한다.
-- 설계 철학, 작업 원칙, 구현 우선순위, 검증 기준은 이 문서에 유지한다.
-- 새로운 phase 요약 문서를 계속 늘리지 않는다.
-- 구현이 바뀌면 이 문서를 갱신한다.
-- **사용자/에이전트의 공식 실행 경로는 CLI 하나로 통일한다.**
+- 설계 철학, 작업 원칙, 구현 우선순위는 이 문서가 source of truth다.
+- 구현이 바뀌면 이 문서를 먼저 갱신한다.
+- 문서가 구현보다 앞서 강한 claim을 하지 않는다.
 
 ---
 
 # 1. 제품 정의
 
-`check_me`는 **C/C++-first 결정론적 정적 보안 후보 생성 도구**다.
+**Aegis Inspect**는 C/C++ 코드베이스를 대상으로, 4단계 파이프라인을 통해 **exploit 가능한 공격 시나리오**를 도출하는 보안 분석 도구다.
 
-이 도구는 다음을 목표로 한다.
-- 코드와 시스템 보안 약속 위반 가능성을 구조적으로 드러낸다.
-- 후보를 생성하고, 그 후보를 뒷받침하는 evidence를 남긴다.
-- 불확실성을 숨기지 않는다.
-- 나중에 LLM이 붙더라도, LLM이 탐지기가 아니라 **해석기**로 동작하도록 기반을 만든다.
+핵심 방향:
+> **결정론적 substrate 추출 → LLM entrypoint mining + 검증 → LLM Evidence IR 구성 → LLM 공격 시나리오 도출**
 
-`check_me`의 핵심 산출물은 **vulnerability finding**이 아니라 **security candidate**다.
+산출물은 security candidate가 아니라 **공격 시나리오(AttackScenario)** 와 그것을 뒷받침하는 **Evidence IR**이다.
 
 ---
 
-# 2. 최상위 철학
+# 2. 핵심 멘탈 모델: Points → Lines → Shapes
 
-## 2.1 Deterministic first
-탐지와 후보 생성은 결정론적이어야 한다.
-동일 입력이면 동일하거나 구조적으로 동일한 결과가 나와야 한다.
+```
+Step 1 → 점(point)을 찾는다
+Step 2 → 선의 시작점(entry point)을 추가·검증한다
+Step 3 → 점들을 이어 선(Evidence IR)을 구성한다
+Step 4 → 선들을 엮어 도형(공격 시나리오)을 완성한다
+```
 
-## 2.2 Candidate, not verdict
-산출물은 후보여야 한다.
-선호 표현:
-- structurally identified candidate
-- structural concern
-- low-confidence candidate
-- moderate-confidence structural concern
-
-금지 표현:
-- proven vulnerability
-- exploitable
-- execution-path verified
-- race detected
-- timing attack detected
-- cryptographic weakness proven
-
-## 2.3 Evidence over impression
-모든 주요 후보는 evidence를 가져야 한다.
-가능하면 아래를 조합한다.
-- file:line
-- function id / function name
-- call graph relation
-- result-use signal
-- enforcement link
-- state lifecycle hint
-- decision input hint
-- selected profile and attribution reason
-
-## 2.4 Domain-first at the surface, primitive-first underneath
-사용자에게 보이는 제품 표면은 **도메인 프로필 중심**이어야 한다.
-내부 엔진은 **재사용 가능한 reasoning primitive 중심**이어야 한다.
-
-즉:
-- 바깥 설명: secure update, auth/session, secure boot, crypto assurance, recovery integrity
-- 내부 구조: result-use, enforcement, state lifecycle, decision input hints, bounded propagation, profile attribution
-
-## 2.5 LLM is delayed on purpose
-LLM은 지금 탐지기가 아니다.
-나중에 아래 역할만 맡는다.
-- candidate interpretation
-- scenario understanding
-- specification mapping
-- triage / prioritization
-- checker synthesis
+- 선의 시작점은 반드시 entry point여야 한다. 중간 지점은 어떤 점이든 될 수 있다.
+- 도형은 선 하나로 이루어질 수도 있고, 같은 선을 여러 번 다른 순서로 쓸 수 있다.
+- Step 1 substrate가 정밀할수록 Step 2~3에서 LLM이 봐야 하는 코드량이 기하급수적으로 줄어든다.
 
 ---
 
-# 3. CLI-First Operational Contract
+# 3. 4단계 파이프라인
 
-이 프로젝트는 **CLI 우선**으로 설계한다.
+## Step 1 — 결정론적 Substrate 구축 (점 추출)
 
-## 3.1 공식 인터페이스
-사용자와 AI Agent가 사용하는 공식 인터페이스는 `check_me` 명령 하나다.
+**주체:** rule-based extractor. LLM 없음.
 
-허용되는 공식 사용 예:
-- `check_me index ...`
-- `check_me security-model ...`
-- `check_me model --mode code ...`
-- `check_me model --mode scenario ...`
-- `check_me stats ...`
-- `check_me validate ...`
-- `check_me list-profiles`
-- `check_me spec-check ...`
+**약속:** 동일 입력 → 동일 출력. "ground truth"가 아니라 추출 가능한 최선의 정적 정보.
+downstream은 100% 정확하지 않을 수 있음을 인지하고 동작한다.
+출력 형식은 단일 형태로 통일된다 (fact / heuristic을 형식적으로 구분하지 않음).
 
-## 3.2 비공식/비권장 인터페이스
-다음은 내부 구현에는 있을 수 있지만, 공식 워크플로우로 문서화하지 않는다.
-- `python -m check_me ...`
-- 특정 모듈 직접 실행
-- ad-hoc one-liner Python script
-- 내부 JSON을 직접 조합해서 기능을 우회 실행하는 방식
+**추출 항목:**
 
-## 3.3 새 기능 추가 원칙
-앞으로 추가되는 주요 기능은 먼저 CLI subcommand 또는 CLI option으로 노출한다.
+| 항목 | 설명 |
+|------|------|
+| Call graph | Clang AST `CallExpr` 기반. 직접 호출, 함수 포인터 간접 호출 포함 |
+| Data/control flow | 함수 내 변수 def/use, 조건 분기 (intra-procedural) |
+| Guard/enforcement 관계 | guard 호출 + 동일 함수 내 result-checking 패턴 |
+| Trust boundary | IPC endpoint, 외부 I/O, 네트워크 소켓, 파일 읽기 (방향은 heuristic) |
+| Config/mode/command trigger | `#ifdef` 블록, CLI 인자 파서, 모드 스위치 (security impact는 heuristic) |
+| Callback registration | 함수 포인터 할당, signal handler, `__attribute__((constructor))`, 함수 테이블 등록 |
+| Evidence anchor | 하드코딩 데이터, key 참조, magic value, 구조적 artifact의 file:line |
 
-예:
-- fixture 검증 기능이 필요하면 `check_me fixture-check ...`
-- profile 패키지 검증이 필요하면 `check_me profile-check ...`
-- 테스트 통합 기능이 필요하면 `check_me test ...`
+**제외 항목:** state lifecycle, persistence/cache, privilege transition
+(RTOS/firmware 환경에서 구조적으로 의미가 약하거나 존재하지 않음)
 
-아직 구현되지 않은 CLI는 문서에 확정 기능처럼 쓰지 않는다.
-
-## 3.4 CLI 안정성 원칙
-- 동일 입력에 대해 구조적으로 동일한 출력
-- exit code 일관성
-- machine-readable JSON artifact 우선
-- human-readable summary는 보조
-- validate / stats / model 결과는 서로 모순되지 않아야 함
+**Exit criteria:**
+- [ ] Clang 기반 call graph가 regex 대비 더 많은 edge를 생성함 (동일 입력 기준)
+- [ ] 7개 항목 모두 JSON으로 추출되고 line number, file path, function signature 포함
+- [ ] 완전 결정론적 (LLM variance 없음)
 
 ---
 
-# 4. 제품 범위
+## Step 2 — LLM Entrypoint Mining + Verification (선의 시작점 추가)
 
-## 4.1 지금 해야 하는 것
-- compile-aware parsing
-- deterministic indexing
-- direct call graph 구축
-- shared artifacts 생성
-- code mode candidate generation
-- scenario mode candidate generation
-- domain profile 기반 scenario execution
-- evidence preserving
-- stats / validate / fixture / tests 정합성 유지
-- 위 기능들을 CLI로 일관되게 실행 가능하게 유지
+**목적:** Step 1의 rule-based로 찾기 어려운 runtime 기반 entry point를 추가하고 검증한다.
+유효한 entry point만 substrate에 누적하여 Step 3의 context 폭발을 방지한다.
 
-## 4.2 지금 주장하면 안 되는 것
-- full taint proof
-- execution path proof
-- path feasibility proof
-- CFG/CPG/SSA 기반 reasoning
-- symbolic execution
-- full protocol verification
-- complete auth protocol soundness
-- complete concurrency correctness
-- complete crypto correctness
-- final CWE correctness
-- automatic mitigation correctness
+### Mining (Proposer)
+- 입력: Step 1 substrate
+- LLM이 runtime에 발생 가능한 path의 entrypoint 후보를 제안
+- "커맨드 X 실행 시 어느 함수가 entry point인가", "이 빌드에서 어떤 config mode가 도달 가능한가"
 
----
+### Verification (Verifier)
+- 별개 LLM 인스턴스가 독립 검증
+- Proposer의 reasoning은 Verifier에게 공개하지 않음 (anchoring 방지)
+- Structured critique schema를 따름:
+  - **reachability:** 이 함수가 runtime에 실제로 도달 가능한가
+  - **attacker-controllability:** 공격자가 이 지점의 입력을 제어할 수 있는가
+  - **assumptions:** 이 entry point가 도달 가능하기 위해 필요한 가정
+  - **refutable substrate edges:** substrate가 이를 뒷받침하는가, 반박하는가
+- 출력: 검증된 entry point → substrate에 누적
+- 낮은 신뢰도의 제거 후보는 **quarantine bucket**에 보관 (silent delete 금지)
 
-# 5. 제품 구조
-
-`check_me`는 두 개의 peer mode를 가진다.
-
-- **Code Mode**: 코드 중심 구조 후보 생성
-- **Scenario Mode**: 보안 명세 위반 중심 구조 후보 생성
-
-두 모드는 shared deterministic foundation 위에서 동작한다.
-모든 주요 기능은 최종적으로 `check_me` CLI를 통해 호출 가능해야 한다.
+**Exit criteria:**
+- [ ] Entrypoint precision ≥ 90% (test dataset 기준)
+- [ ] Entrypoint recall ≥ 95% (보안 관련 entry point 누락 없음)
+- [ ] Quarantine hit 별도 추적 및 보고
 
 ---
 
-# 6. Shared Deterministic Foundation
+## Step 3 — LLM Evidence IR 구성 (선 구성)
 
-## 6.1 입력
-- source tree
-- compile_commands.json
-- registry / rule data
-- optional scenario spec
-- optional scenario profiles
+**목적:** runtime-context-conditioned path bundle synthesis.
+Step 2 entry point를 시작점으로 점들을 이어 실행 path의 선을 구성한다.
 
-## 6.2 shared core responsibilities
-- compile_commands ingestion
-- parser backend selection (`clang_json` 우선, `libclang` 보조)
-- deterministic indexing
-- persistent cache
-- function extraction
-- direct call graph
-- function summaries
-- structural reasoning primitives
-- stats
-- validation
+**Retrieval 정책:**
+- LLM이 볼 수 있는 코드 범위는 substrate edge 기반 N-hop neighborhood로 결정론적으로 자름
+- LLM의 자유 선택 금지
+- default N=2, escalation policy 허용
 
-## 6.3 shared artifacts
-최소한 아래 아티팩트는 shared 또는 mode별 기반이 된다.
-- `symbols.json`
-- `files.json`
-- `call_graph.json`
-- `function_summaries.json`
-- `stats.json`
-- validation output
+**강제 invariant:**
+- 모든 path에는 entry point가 명시되어야 함
+- 모든 claim은 file:line provenance를 가져야 함
+- sink는 IR에 꼭 포함될 필요 없음 — 목적은 runtime에 실행 가능한 Evidence IR을 모두 끌어내는 것
 
-## 6.4 구현 원칙
-- compile_commands.json 없으면 heuristic fallback을 남발하지 않는다.
-- parser backend 차이는 artifact metadata에 남긴다.
-- cache는 backend/mtime/compile hash에 민감해야 한다.
-- deterministic ordering을 강제한다.
-- stateful randomness를 쓰지 않는다.
-- foundation 결과는 CLI로 재현 가능해야 한다.
+**Evidence IR Schema:**
+```yaml
+EvidenceIR:
+  id: string
 
----
+  entrypoint:
+    function: string
+    file: string
+    line: integer | null
 
-# 7. Code Mode
+  runtime_context:
+    trigger_type: command | config | callback | event | boot_phase | unknown
+    trigger_ref: string | null
 
-## 7.1 Code Mode가 답하려는 질문
-- dangerous API가 있는가
-- source와 sink가 구조적으로 가까운가
-- sanitizer가 보이는가
-- bounded propagation이 후보의 신뢰도/상태를 바꾸는가
-- 코드 수준에서 review할 만한 structural security concern이 있는가
+  path:
+    nodes:
+      - function: string
+        file: string
+        line: integer | null
+        role: entry | guard | sink | intermediate | unknown
+    edges:
+      - from: string
+        to: string
+        kind: call | dataflow | controlflow | callback | config | state
 
-## 7.2 Code Mode의 현재 철학
-Code Mode는 vulnerability detector가 아니다.
-Code Mode는 코드 중심 structural candidate generator다.
+  conditions:
+    required:
+      - string
+    blocking:
+      - string
 
-## 7.3 핵심 구성요소
-- source/sink/sanitizer matcher
-- bounded propagation
-- code candidate generator
-- candidate state refinement
-- profile-unaware core candidate logic
+  evidence:
+    anchors:
+      - file: string
+        line_start: integer
+        line_end: integer
+        note: string
 
-## 7.4 Code Mode 주요 아티팩트
-- `source_sink_matches.json`
-- `flow_seeds.json`
-- `propagation_paths.json`
-- `code_candidates.json`
+  confidence:
+    level: high | medium | low
+    reason: string
+```
 
-## 7.5 Candidate states
-가능하면 아래 상태를 유지한다.
-- ACTIVE
-- FILTERED
-- BOUNDARY_LIMITED
-- SANITIZER_AFFECTED
-
-## 7.6 Code Mode 제약
-- direct calls 우선
-- bounded depth 우선
-- unresolved / indirect는 explicit boundary로 남긴다
-- sanitizer effect는 과대평가하지 않는다
-- source→sink는 구조적 concern이지 proof가 아니다
-
-## 7.7 Code Mode 향후 심화 방향
-후속 심화 순서:
-1. points-to / alias-lite
-2. indirect call boundary refinement
-3. stronger propagation summaries
-4. selected taint-like refinement
-5. constraint-aware but bounded filtering
-
-단, 이는 full taint engine이나 symbolic execution을 바로 뜻하지 않는다.
-
-## 7.8 Code Mode CLI 원칙
-Code Mode의 모든 일반 사용 흐름은 아래처럼 CLI로 닫혀야 한다.
-- `check_me index ...`
-- `check_me security-model ...`
-- `check_me model --mode code ...`
-- `check_me stats ...`
-- `check_me validate ...`
-
-직접 Python API 호출 예시는 내부 개발 참고용일 수는 있어도, 공식 사용법의 중심에 두지 않는다.
+**Exit criteria:**
+- [ ] Evidence IR cluster가 test project의 모든 알려진 취약 path를 커버
+- [ ] 동일 함수가 여러 cluster에 등장하는 것은 정상 (path별 context 차이)
+- [ ] Cluster 내 코드 snippet 합계 < 전체 소스 라인의 30%
 
 ---
 
-# 8. Scenario Mode
+## Step 4 — LLM 공격 시나리오 도출 (도형 완성)
 
-## 8.1 Scenario Mode가 답하려는 질문
-- 필요한 check가 존재하는가
-- 그 check의 결과가 실제 enforcement에 쓰이는 흔적이 있는가
-- 필요한 auth/verified/trusted state가 보이는가
-- 민감 action 전에 요구된 precondition이 구조적으로 보이는가
-- stale state, replay, weak version policy, rollback risk, missing self-test 같은 구조적 문제가 보이는가
+**목적:** Evidence IR(선)들을 엮어 exploit chain을 도출한다.
 
-## 8.2 Scenario Mode의 핵심 정의
-Scenario Mode는 generic security zoo가 아니다.
-Scenario Mode는 **security-specification violation candidate engine**이다.
+**필수 조건:**
+- 도출한 시나리오에는 Evidence IR들을 엮어 도출한 exploit chain이 반드시 명시되어야 함
+- Evidence를 엮어 시나리오를 생성할 때 최소 하나 이상의 sink가 포함되어야 유효한 공격 시나리오
 
-즉 이 모드는 아래를 본다.
-- check presence
-- result use
-- enforcement linkage
-- required state
-- trusted/untrusted decision inputs
-- stale state reuse
-- domain-profile relevance
+**AttackScenario Schema:**
+```yaml
+AttackScenario:
+  id: string
+  title: string
 
-## 8.3 Scenario Mode 출력물
-- `scenario_candidates.json`
-- `guard_evidence.json`
-- `profile_summary.json` (profile-aware 실행 시)
-- profile-aware fields in `stats.json`
+  exploit_chain:
+    steps:
+      - order: integer
+        evidence_ir: string
+        action: string
+        result: string
 
-## 8.4 Scenario Mode claim rule
-Scenario Mode는 execution path를 증명하지 않는다.
-대신 다음 표현을 선호한다.
-- structurally identified
-- structurally suggested
-- not clearly shown to gate the action
-- structural evidence of missing enforcement
+  sink:
+    function: string
+    file: string
+    line: integer | null
+    sink_type: memory_write | command_execution | auth_bypass | crypto_misuse |
+               info_leak | state_corruption | resource_exhaustion | unknown
 
-## 8.5 Scenario Mode CLI 원칙
-Scenario Mode의 공식 실행 경로도 CLI로 통일한다.
+  impact:
+    category: memory_corruption | privilege_bypass | data_leak | denial_of_service |
+              integrity_violation | crypto_break | unknown
+    description: string
 
-예:
-- `check_me list-profiles`
-- `check_me model --mode scenario --profile secure_update_install_integrity ...`
-- `check_me model --mode scenario --scenario-spec ./my_scenario.yaml ...`
-- `check_me spec-check --scenario-spec ./my_scenario.yaml`
-- `check_me stats ...`
-- `check_me validate ...`
+  verdict:
+    exploitability: high | medium | low | unproven
+    confidence: high | medium | low
+    reason: string
+```
 
-향후 profile 검사, fixture 실행, scenario pack 검증도 가능하면 CLI 하위 명령으로 노출한다.
+**Exit criteria:**
+- [ ] 시나리오마다 exploit chain + 최소 1개 sink 명시
+- [ ] 시나리오가 specific function과 line number를 참조함 (free-form 금지)
+- [ ] Steps 3/4 LLM이 보는 코드 < 전체 소스 라인의 30%
 
 ---
 
-# 9. Domain Profiles
+# 4. 핵심 설계 규칙
 
-도메인 프로필은 Scenario Mode의 주된 제품 표면이다.
+**Rule 1: Step 1은 천장이다**
+Steps 2-4는 Step 1이 담지 않은 정보를 생성할 수 없다. Step 1 completeness에 투자한다.
 
-## 9.1 Stable profiles
+**Rule 2: Step 1은 결정론적이다 — ground truth가 아니다**
+Step 1에 LLM 없음. "동일 입력 → 동일 출력"이 약속이지 "100% 정확"이 약속이 아니다.
+Downstream은 substrate 불완전성을 인지하고 동작한다.
 
-### `secure_update_install_integrity`
-핵심 질문:
-- verify-before-update/install/use가 있는가
-- verification result가 write/install/activate를 gate하는가
-- stale trusted metadata reuse 위험이 보이는가
-- rollback / version policy가 구조적으로 약해 보이는가
+**Rule 3: Step 2는 proposing과 verifying을 분리한다**
+Proposer reasoning은 Verifier에게 공개하지 않는다. Verifier는 structured critique schema를 따른다.
 
-대표 candidate families:
-- `UPDATE_PATH_WITHOUT_AUTHENTICITY_CHECK`
-- `ACTION_BEFORE_REQUIRED_CHECK`
-- `RESULT_NOT_ENFORCED`
-- `VERSION_POLICY_WEAK_OR_INCONSISTENT`
-- `ROLLBACK_PROTECTION_MISSING_OR_WEAK`
+**Rule 4: Confidence와 uncertainty는 필수 필드다**
+모든 LLM 생성 구조체(Steps 2-4)는 `confidence`와 근거를 담는다. 예외 없음.
 
-### `auth_session_replay_state`
-핵심 질문:
-- privileged action 전에 verified/authenticated state가 필요한가
-- 그 state가 실제로 gate에 쓰이는가
-- replay/persistence/stale state reuse 위험이 구조적으로 보이는가
+**Rule 5: Quarantine은 감사 가능해야 한다**
+Step 2의 false positive 제거는 추적 가능해야 한다. 낮은 신뢰도 제거는 quarantine으로, silent delete 금지.
 
-대표 candidate families:
-- `PRIVILEGED_ACTION_WITHOUT_REQUIRED_STATE`
-- `STATE_PERSISTENCE_REPLAY_RISK`
-- `RESULT_NOT_ENFORCED`
+**Rule 6: Retrieval은 결정론적이다**
+Steps 3/4 LLM이 볼 수 있는 코드는 substrate edge 기반 N-hop neighborhood로 결정론적으로 자른다.
+LLM 자유 선택 금지.
 
-## 9.2 Experimental profiles
+**Rule 7: Evidence IR이 source of truth다**
+Step 3가 Evidence IR을 생성하면, Step 4와 평가는 이를 기반으로 동작한다. raw source에서 semantics를 재구성하지 않는다.
 
-### `secure_boot_chain`
-핵심 질문:
-- verify-before-execute 구조가 보이는가
-- partition-level verify omission이 보이는가
-- chain-of-trust gap indicator가 보이는가
+**Rule 8: Overlap은 의도된 설계다**
+동일 함수가 여러 Evidence IR cluster에 등장하는 것은 버그가 아니다. 각 cluster는 해당 함수를 다른 실행 context에서 포착한다.
 
-### `crypto_operational_assurance`
-핵심 질문:
-- self-test-before-use가 보이는가
-- secret verification context에서 narrow compare concern이 보이는가
-- countermeasure setup missing이 구조적으로 보이는가
+**Rule 9: Ground truth는 외부에서 온다**
+평가 데이터셋은 CVE, authoritative benchmark, 출판된 연구에서 trace 가능해야 한다.
+LLM 생성 synthetic data를 capability claim의 근거로 삼지 않는다.
 
-### `error_recovery_state_integrity`
-핵심 질문:
-- abnormal condition handling이 보이는가
-- failure cleanup이 보이는가
-- stale state reuse after failure/recovery가 보이는가
-
-## 9.3 Profile metadata
-각 profile은 적어도 다음 메타데이터를 가져야 한다.
-- profile_id
-- maturity: stable | experimental
-- intended domain
-- enabled candidate families
-- primary structural artifacts used
-
-## 9.4 Profile overlap
-하나의 candidate는 여러 profile과 관련될 수 있다.
-이 경우:
-- primary profile 하나를 정한다
-- shared / secondary relevance를 명시한다
-- silent duplication은 피한다
-- tie-breaking은 deterministic해야 한다
+**Rule 10: Project-level dataset이 first-class다**
+단일 파일 fixture는 primitive unit test에는 유용하지만 pipeline 검증에는 불충분하다.
 
 ---
 
-# 10. 실제 타깃 시나리오 클래스
+# 5. 데이터셋 전략
 
-`check_me`는 아래와 같은 구조적으로 식별 가능한 시나리오들에 가까워져야 한다.
+## 5.1 요건
 
-- update failure 후 stale trusted header/state reuse
-- crypto image update without authenticity verification
-- verification called but not enforced before write/install/activate
-- incomplete/finalization-weak update acceptance
-- auth/session state replay or persistence risk
-- self-test-before-crypto-use missing
-- version/build-date / rollback policy weakness
-- abnormal condition / recovery state integrity weakness
-- secure boot chain / verify-before-execute expectations
+- **출처:** CVE, 연구 논문, 대기업 보안 어드바이저리 등 공신력 있는 외부 자료 선행 수집 필수
+- **규모:** 단일 파일 아님. 10-20개 소스 파일, 빌드 시스템(Makefile / compile_commands.json), 복수 실행 모드
+- **self-contained:** 해당 프로젝트 소스코드만으로 전체 분석·평가 파이프라인이 동작해야 함
+  - 외부 레포 의존, 하드웨어 환경(HSM, proprietary boot ROM) 의존 데이터셋 부적합
+  - Linux kernel 등 매우 큰 프로젝트 후순위
+- **라벨:** CVE 패치 분석 + 공격 시나리오 조사 + LLM 보조 라벨 구성 + 사람 검증
 
-중요:
-이 문장은 “이미 완전히 탐지한다”는 뜻이 아니다.
-이것은 설계 앵커(anchor)다.
-fixture, profile, candidate family, artifact는 이 시나리오들을 향해 정렬되어야 한다.
+## 5.2 라벨 구성 원칙 (CVE patch-driven)
 
----
+1. **CVE 패치 분석** — fix commit과 parent를 읽어 변경 함수, 추가된 guard, 수정된 상태 변수 식별
+2. **공격 시나리오 조사** — public exploit write-up, vendor advisory 수집
+3. **LLM 보조 라벨 구성** — CVE 설명 + patch diff + 공격 시나리오를 입력으로:
+   - 취약점을 실행 path로 매핑 ("커맨드 X → 함수 A 진입 → 함수 B에서 취약점 발현")
+   - Gold-standard finding을 path 단위로 정의 (함수 단위 아님)
+   - patch diff와 교차 검증
+4. **사람 검증** — 모든 LLM 구성 라벨은 원본 CVE와 patch 대비 검토 후 corpus에 등록
 
-# 11. Structural Reasoning Primitives
+## 5.3 중간 평가
 
-내부적으로 재사용할 핵심 primitive는 다음과 같다.
+각 step 산출물은 독립적으로 평가 가능해야 한다:
 
-- result-use links
-- enforcement links
-- action/guard mapping
-- state summaries
-- state lifecycle entries
-- decision input hints
-- bounded propagation summaries
-- profile attribution metadata
-
-각 primitive는 다음 특성을 가져야 한다.
-- deterministic
-- compact
-- machine-readable
-- confidence bounded
-- heuristic 여부 표시 가능
+| Step | 산출물 | 평가 방법 |
+|------|--------|-----------|
+| Step 1 | Substrate | 구조적 completeness: 모든 edge, 모든 state 추적 여부. hand-verified graph 대비 비교 |
+| Step 2 | Verified entrypoints | Precision/recall: 보안 관련 entry point 보존 여부, trivial FP 제거 여부. Quarantine hit 집계 |
+| Step 3 | Evidence IR clusters | Path coverage: 알려진 취약 path 커버 여부. guards_missing 정확성 |
+| Step 4 | Attack scenarios | Gold matching: 시나리오가 gold vulnerability와 매칭되는가 |
 
 ---
 
-# 12. Confidence / Claim Policy
+# 6. 마이그레이션 전략
 
-## 12.1 confidence 의미
-confidence는 exploitability probability가 아니다.
-confidence는 **구조적 증거 강도**다.
+단계적으로 진행한다. Big-bang rewrite 금지.
 
-## 12.2 허용 구간
-현재는 low ~ moderate 범위를 넘기지 않는 것이 기본이다.
-고신뢰(high confidence) 표현은 CFG/feasibility/semantic reasoning 없이는 쓰지 않는다.
+## Stage 0 — 결정론적 Substrate 구축
+Step 1 구현. Clang AST 기반 call graph, 7개 substrate 항목 추출.
 
-## 12.3 must-not-claim 목록
-다음은 현재 금지한다.
-- execution path verified
-- vulnerability proven
-- exploitable confirmed
-- crypto broken
-- race detected
-- deadlock detected
-- timing attack confirmed
+## Stage 1 — Entrypoint Mining + Evidence IR
+Step 2, 3 구현. LLM prompt 설계, code snippet 추출, quarantine bucket.
+
+## Stage 2 — 공격 시나리오 생성
+Step 4 구현. AttackScenario schema 연동, 평가 harness 연결.
+
+## Stage 3 — 전체 파이프라인 평가
+End-to-end 평가, A/B 비교 (구 scenario_mode vs 신 4-step), cost 분석, quarantine audit.
 
 ---
 
-# 13. Validation / Testing Policy
+# 7. 에이전트 작업 규칙
 
-## 13.1 validation 목표
-validate는 단순 존재 확인이 아니라, 아래를 본다.
-- artifact schema validity
-- profile metadata consistency
-- deterministic ordering
-- no invalid profile ids
-- no candidate mislabeled as finding/vulnerability/CWE
-
-## 13.2 testing 목표
-테스트는 최소한 아래를 포함한다.
-- artifact generation
-- schema validity
-- profile overlap determinism
-- backward compatibility
-- target scenario fixture integration
-- CLI behavior consistency
-
-## 13.3 CLI-based verification principle
-가능한 한 검증과 점검은 `check_me` CLI를 통해 수행한다.
-
-장기적으로 이상적인 형태:
-- `check_me validate ...`
-- `check_me stats ...`
-- `check_me spec-check ...`
-- `check_me list-profiles`
-- `check_me fixture-check ...` *(future if needed)*
-- `check_me test ...` *(future if needed)*
-
-즉, 내부 테스트 프레임워크가 있더라도 사용자/에이전트 워크플로우는 CLI 중심으로 수렴시킨다.
+1. README는 짧게 유지한다.
+2. 새 기능은 반드시 CLI subcommand로 먼저 노출한다.
+3. Step 1 구현에서 LLM을 쓰지 않는다.
+4. substrate 항목을 fact / heuristic으로 형식 분리하지 않는다.
+5. Evidence IR마다 entry point와 file:line provenance가 있는지 확인한다.
+6. AttackScenario에 exploit chain과 sink가 명시되어 있는지 확인한다.
+7. 구현이 바뀌면 이 문서를 먼저 갱신한다.
+8. 현재 구현보다 강한 claim을 문서에 쓰지 않는다.
+9. dataset ground truth는 외부 출처에서 trace 가능해야 한다.
 
 ---
 
-# 14. LLM Role (Future)
+# 8. 현재 상태
 
-LLM은 primary detector가 아니다.
-후속 phase에서 아래 역할을 맡는다.
-- candidate interpretation
-- scenario reasoning
-- specification mapping
-- triage/prioritization
-- checker synthesis
+## 구 구현 (archive/v0-old-design)
+- `check_me` v0.1.0: regex 기반 heuristic indexer, scenario mode, code mode
+- 83개 테스트, 5개 도메인 프로필, 15개 candidate family
+- 한계: intra-procedural only, positive-only detection, regex call graph, single-file fixture
 
-LLM을 붙이기 위한 전제 조건:
-- profile-driven scenario execution 안정화
-- target scenario pack 확장
-- stronger structural artifacts
-- stats/validate consistency
-- docs/product truth consistency
-
-이 전제 없이 LLM을 붙이면 heuristic noise를 설명만 그럴듯하게 만들 위험이 있다.
+## 현재 방향
+- Stage 0 (결정론적 Substrate) 구현 전
+- 기존 소스 구조는 archive 브랜치에 보존
+- 신규 구현은 4-step 파이프라인 기준으로 진행
 
 ---
 
-# 15. 에이전트 작업 규칙
+# 9. 한 줄 결론
 
-AI Agent는 앞으로 작업할 때 아래를 반드시 따른다.
-
-1. README를 길게 만들지 말 것
-2. 상세 설계는 PLAN.md를 source of truth로 볼 것
-3. 새 phase 문서를 무한정 늘리지 말 것
-4. 새 기능을 넣을 때 공식 CLI 진입점부터 생각할 것
-5. profile/domain surface와 internal primitive를 혼동하지 말 것
-6. 현재 구현보다 강한 claim을 문서에 쓰지 말 것
-7. candidate와 finding을 혼동하지 말 것
-8. 테스트/validate/stats/doc이 서로 모순되지 않게 할 것
-9. 외부 검색이 없다는 전제로, 필요한 설계 원칙을 문서 안에 충분히 적을 것
-10. 구현이 바뀌면 README보다 먼저 PLAN의 철학/구조를 점검할 것
-
----
-
-# 16. 구현 상태 및 다음 우선순위
-
-## 16.1 구현 완료 항목 (v0.1.0)
-
-1. **CLI-first consistency** — 완료
-   - `check_me index / security-model / model / stats / validate / list-profiles / interpret / spec-check`
-   - 83개 테스트 통과 (E2E CLI 포함)
-
-2. **profile-driven scenario execution 안정화** — 완료
-   - 5개 profile (stable 2, experimental 3)
-   - RESULT_NOT_ENFORCED, PRIVILEGED_ACTION_WITHOUT_REQUIRED_STATE 등 15개 candidate family
-
-3. **target scenario pack 강화** — 완료
-   - update_integrity, auth_session, buffer_safety C/C++ fixture
-   - rules/c_cpp_registry.yaml (5개 rule, source/sink/sanitizer 매핑)
-
-4. **code mode refinement** — 완료
-   - BFS source→sink path tracing (실제 경로 기록)
-   - sanitizer-on-path 탐지 → SANITIZER_AFFECTED
-   - enforcement link 존재 시 confidence 보정
-
-5. **deeper structural reasoning** — 완료
-   - `core/primitives.py`: result-use links, enforcement links, state lifecycle, decision input hints
-   - 함수 본문 brace-matching 추출
-   - primitives.json shared artifact
-
-6. **LLM interpretation layer** — 완료 (stub + 실 연동 준비)
-   - `check_me interpret` CLI subcommand
-   - LLM disabled 시 placeholder (graceful degradation)
-   - 사내 서버 연동: .env의 CHECK_ME_LLM_* 변수로 설정
-   - system prompt: interpreter 역할 명시, forbidden claim 방지
-
-## 16.2 다음 심화 방향
-
-아래는 현재 구현 위에서 선택적으로 강화할 수 있는 방향이다.
-우선순위는 실제 분석 대상 코드베이스 규모와 사용 패턴에 따라 결정한다.
-
-- **points-to / alias-lite**: indirect call boundary 정밀화
-- **clang_json parser backend**: heuristic regex 대신 실제 AST 활용
-- **stronger propagation summaries**: inter-procedural summary 캐싱
-- **LLM triage integration**: interpret 결과를 ACTIVE candidate 우선순위화에 활용
-- **checker synthesis**: profile + candidate → 검사 코드 자동 생성 (LLM)
-
-즉, **현재 deterministic substrate는 충분히 구축됐으며, 이제 실제 코드베이스 적용 및 LLM 연동 활성화 단계**다.
-
----
-
-# 17. 문서 관리 원칙
-
-- README: 짧고 핵심만
-- PLAN.md: 설계 기준서
-- 추가 문서는 정말 필요한 completion/proof용만
-- phase가 끝날 때마다 README를 비대하게 만들지 않는다
-- 문서가 코드보다 앞서 과장하지 않도록 항상 점검한다
-
----
-
-# 18. 한 줄 결론
-
-`check_me`는 **C/C++-first, CLI-first, deterministic-first** 보안 후보 생성 도구다.
-
-- Code Mode는 코드 중심 구조 후보를 생성한다.
-- Scenario Mode는 domain profile 기반 보안 명세 위반 후보를 생성한다.
-- LLM은 `check_me interpret`를 통해 해석기로 동작한다 (탐지기 아님).
-- 사내 서버 LLM은 .env의 CHECK_ME_LLM_* 변수로 활성화한다.
-- deterministic substrate가 구축됐으며, 실제 코드베이스 적용 단계다.
+Aegis Inspect는 **결정론적 substrate → LLM entrypoint mining → Evidence IR → 공격 시나리오**의 4단계 파이프라인으로, project-level C/C++ 코드베이스에서 exploit 가능한 공격 시나리오를 도출하는 도구다.
