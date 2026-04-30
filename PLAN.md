@@ -76,7 +76,7 @@ downstream은 100% 정확하지 않을 수 있음을 인지하고 동작한다.
 
 ### Mining (Proposer)
 - 입력: Step 1 substrate
-- LLM이 runtime에 발생 가능한 path의 entrypoint 후보를 제안
+- LLM이 runtime에 발생 가능한 path의 entrypoint 후보를 제안하여 substrate에 추가함
 - "커맨드 X 실행 시 어느 함수가 entry point인가", "이 빌드에서 어떤 config mode가 도달 가능한가"
 
 ### Verification (Verifier)
@@ -220,8 +220,8 @@ Downstream은 substrate 불완전성을 인지하고 동작한다.
 **Rule 3: Step 2는 proposing과 verifying을 분리한다**
 Proposer reasoning은 Verifier에게 공개하지 않는다. Verifier는 structured critique schema를 따른다.
 
-**Rule 4: Confidence와 uncertainty는 필수 필드다**
-모든 LLM 생성 구조체(Steps 2-4)는 `confidence`와 근거를 담는다. 예외 없음.
+**Rule 4: Confidence는 필수 필드다**
+모든 LLM 생성 구조체(Steps 2-4)는 `confidence.level`과 `confidence.reason`을 담는다. 예외 없음.
 
 **Rule 5: Quarantine은 감사 가능해야 한다**
 Step 2의 false positive 제거는 추적 가능해야 한다. 낮은 신뢰도 제거는 quarantine으로, silent delete 금지.
@@ -254,6 +254,8 @@ LLM 생성 synthetic data를 capability claim의 근거로 삼지 않는다.
 - **self-contained:** 해당 프로젝트 소스코드만으로 전체 분석·평가 파이프라인이 동작해야 함
   - 외부 레포 의존, 하드웨어 환경(HSM, proprietary boot ROM) 의존 데이터셋 부적합
   - Linux kernel 등 매우 큰 프로젝트 후순위
+  - 전체 코드베이스 클론 후 평가에 모두 사용해야 함 (서브셋 평가 금지)
+- **평가 데이터셋 구축:** 데이터셋 수집 후 LLM이 Step 1, 2, 3 구조에 맞게 고품질 평가 데이터셋을 구축하고, 이를 이용하여 각 step의 중간평가가 가능해야 함
 - **라벨:** CVE 패치 분석 + 공격 시나리오 조사 + LLM 보조 라벨 구성 + 사람 검증
 
 ## 5.2 라벨 구성 원칙 (CVE patch-driven)
@@ -300,14 +302,17 @@ End-to-end 평가, A/B 비교 (구 scenario_mode vs 신 4-step), cost 분석, qu
 # 7. 에이전트 작업 규칙
 
 1. README는 짧게 유지한다.
-2. 새 기능은 반드시 CLI subcommand로 먼저 노출한다.
-3. Step 1 구현에서 LLM을 쓰지 않는다.
-4. substrate 항목을 fact / heuristic으로 형식 분리하지 않는다.
-5. Evidence IR마다 entry point와 file:line provenance가 있는지 확인한다.
-6. AttackScenario에 exploit chain과 sink가 명시되어 있는지 확인한다.
-7. 구현이 바뀌면 이 문서를 먼저 갱신한다.
-8. 현재 구현보다 강한 claim을 문서에 쓰지 않는다.
-9. dataset ground truth는 외부 출처에서 trace 가능해야 한다.
+2. Step 1 구현에서 LLM을 쓰지 않는다.
+3. substrate 항목을 fact / heuristic으로 형식 분리하지 않는다.
+4. downstream은 Step 1 substrate가 100% 정확하지 않을 수 있음을 인지하고 동작한다.
+5. Step 2에서 proposer의 reasoning을 verifier에게 공개하지 않는다.
+6. Evidence IR마다 entry point가 명시되어 있는지 확인한다.
+7. AttackScenario에 exploit chain과 최소 1개 sink가 명시되어 있는지 확인한다.
+8. 데이터셋은 전체 코드베이스 클론 후 평가에 모두 사용한다.
+9. dataset ground truth는 외부 출처(CVE, 연구 논문 등)에서 trace 가능해야 한다.
+10. LLM 생성 synthetic data를 평가 근거로 쓰지 않는다.
+11. 구현이 바뀌면 이 문서를 먼저 갱신한다.
+12. 현재 구현보다 강한 claim을 문서에 쓰지 않는다.
 
 ---
 

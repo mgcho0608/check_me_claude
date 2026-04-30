@@ -17,12 +17,14 @@
 - README는 짧게 유지 / 상세 설계는 PLAN.md가 source of truth
 - Step 1 구현에 LLM을 쓰지 않는다
 - substrate 항목을 fact / heuristic으로 형식 분리하지 않는다
-- Evidence IR마다 entry point와 file:line provenance가 있는지 확인한다
+- downstream은 Step 1 substrate가 100% 정확하지 않을 수 있음을 인지하고 동작한다
+- Step 2에서 proposer의 reasoning을 verifier에게 공개하지 않는다
+- Evidence IR마다 entry point가 명시되어 있는지 확인한다
 - AttackScenario에 exploit chain과 최소 1개 sink가 명시되어 있는지 확인한다
+- 데이터셋은 전체 코드베이스 클론 후 평가에 모두 사용한다
 - dataset ground truth는 반드시 외부 출처(CVE, 연구 논문 등)에서 trace 가능해야 한다
 - LLM 생성 synthetic data를 평가 근거로 쓰지 않는다
 - 현재 구현보다 강한 claim을 문서에 쓰지 않는다
-- 새 기능은 반드시 CLI subcommand로 먼저 노출한다
 
 ## 현재 개발 우선순위 (PLAN.md §6)
 
