@@ -274,7 +274,7 @@ LLM 생성 synthetic data를 capability claim의 근거로 삼지 않는다.
 |------|--------|-----------|
 | Step 1 | Substrate | 구조적 completeness: 모든 edge, 모든 state 추적 여부. hand-verified graph 대비 비교 |
 | Step 2 | Verified entrypoints | Precision/recall: 보안 관련 entry point 보존 여부, trivial FP 제거 여부. Quarantine hit 집계 |
-| Step 3 | Evidence IR clusters | Path coverage: 알려진 취약 path 커버 여부. guards_missing 정확성 |
+| Step 3 | Evidence IR clusters | Path coverage: 알려진 취약 path 커버 여부. entry point 명시 여부, conditions 정확성, file:line provenance 포함 여부 |
 | Step 4 | Attack scenarios | Gold matching: 시나리오가 gold vulnerability와 매칭되는가 |
 
 ---
