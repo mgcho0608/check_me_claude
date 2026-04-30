@@ -13,10 +13,11 @@ build/
 .mypy_cache/
 .ruff_cache/
 
-# check_me 출력 아티팩트
+# 런타임 출력 아티팩트
 *.json
 !rules/**/*.json
 !tests/**/*.json
+!datasets/**/*.json
 
 # 에디터
 .vscode/
