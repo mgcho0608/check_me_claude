@@ -272,15 +272,17 @@ Evaluation datasets must be grounded in externally verifiable truth. The hierarc
 
 ### 4.2 Project-level codebase requirement
 
-Single-file test fixtures are insufficient. The pipeline requires codebases with:
+Check Me is a **project-level** tool. Evaluation must be performed on project-level codebases — never on isolated files, snippets, or vulnerable functions extracted from their context. The target zone is "non-trivially-sized but not too large to clone, build, and analyze end-to-end". The pipeline requires codebases with:
 
-- **Multiple source files with inter-file dependencies.** No fixed lower or upper bound on file count — small utilities and substantially larger projects are both acceptable as long as the self-contained rule (4.2.1) holds. Linux-kernel-scale projects remain low priority for separate reasons (see 4.2.1).
+- **Multiple source files with inter-file dependencies.** Project-level (not single-file). No rigid file-count bound; the binding constraints are (a) self-containedness (§4.2.1) and (b) "not too large" — Linux-kernel-scale projects are out of scope.
 - **A build system** (Makefile or compile_commands.json) with at least 2 build configurations
 - **Multiple entry points or command modes** (e.g., --mode usb, --mode network, --mode recovery)
 - **Interprocedural state sharing** (global variables, shared headers)
 - **Known vulnerabilities** with clear gold-standard answers per execution path
 - **Both positive and negative cases** (vulnerable paths and secure paths)
 - **Ambiguous cases** (paths where multiple vulnerability interpretations are valid)
+
+**Rule: Project-level only.** Check Me is never validated against single-file fixtures, function-level snippets, or hand-extracted vulnerable code. If it cannot be checked out as a real project, it is not a valid dataset entry.
 
 ### 4.2.1 Self-contained project requirement
 
@@ -295,16 +297,19 @@ This means:
 
 ### 4.2.2 Label construction from CVE patches
 
-When a CVE does not come with ready-made labels in the format Check Me requires, construct them through:
+**Mandatory precondition:** The vulnerable project must be cloned at the vulnerable commit before any label construction begins. Labels are constructed against the actual cloned source — never against CVE descriptions, patch diffs, or write-ups in isolation. CVE text and patches are inputs to label reasoning, not substitutes for the source code being labeled.
 
-1. **CVE patch analysis** — Read the fix commit and its parent. Identify: which functions changed, which guards were added, which state variables were introduced or modified
-2. **Attack scenario research** — Search for public exploit write-ups, vendor advisories, or security blog posts that describe how the vulnerability is triggered
-3. **LLM-assisted label construction** — Feed the CVE description, patch diff, and attack scenario to LLM with strict verification rules:
-   - Map the vulnerability to execution path: "user runs command X → enters function A → vulnerability manifests at function B"
+The construction sequence is:
+
+1. **Clone the vulnerable repository at the vulnerable commit.** Identify the commit immediately before the fix commit and check out the project at that revision. Preserve the full source tree, build system, and configuration.
+2. **CVE patch analysis** — Read the fix commit and its parent against the cloned source. Identify which functions changed, which guards were added, which state variables were introduced or modified, with file:line references that resolve in the cloned repo.
+3. **Attack scenario research** — Search for public exploit write-ups, vendor advisories, or security blog posts that describe how the vulnerability is triggered, and locate the corresponding code paths in the cloned source.
+4. **LLM-assisted label construction** — Feed the CVE description, patch diff, attack scenario, and the cloned source code excerpts to the LLM with strict verification rules:
+   - Map the vulnerability to execution path inside the cloned source: "user runs command X → enters function A at file:line → vulnerability manifests at function B at file:line"
    - Define gold-standard findings per path (not per function)
    - Identify expected guard absence, missing enforcement, or state lifecycle gaps
-   - Cross-reference against patch diff to verify label matches what the fix addresses
-4. **Human verification** — Every LLM-constructed label must be reviewed against the original CVE description and patch before entering the corpus
+   - Cross-reference against patch diff and cloned source to verify the label matches what the fix addresses and where it lives in the tree
+5. **Human verification** — Every LLM-constructed label must be reviewed against the original CVE, the patch, and the cloned source before entering the corpus. file:line references in labels must resolve in the cloned tree.
 
 ### 4.3 Dataset collection approach
 
@@ -340,11 +345,13 @@ Target: 3-5 project-level datasets with known scenario-based vulnerabilities bef
 ### 4.6 Dataset construction rules (non-negotiable)
 
 1. **Authoritative source required.** Dataset construction must be preceded by external material collection from CVE records, research papers, enterprise security advisories. Evaluation must NEVER be based on LLM-generated synthetic data as ground truth.
-2. **Project-level, known scenario match.** Data collection targets project-level codebases where known scenario-based vulnerabilities can be matched. Single-file fixtures are insufficient for pipeline validation.
-3. **Self-contained source.** The entire analysis and evaluation pipeline must operate on the project's source code alone. Projects that depend on external codebases (shared libraries from other repos, kernel headers not included) or specific hardware environments (HSM coprocessors, proprietary boot ROMs) are not suitable.
-4. **Full codebase clone.** Evaluate on the entire cloned project codebase, not a subset. Linux kernel and similarly massive projects are low priority.
-5. **CVE patch-driven label construction.** When a CVE does not come with labels in Check Me's required format, construct them through: (a) CVE patch analysis — read fix commit and parent, identify changed functions, added guards, modified state variables; (b) attack scenario research — public exploit write-ups, vendor advisories; (c) LLM-assisted label construction with strict verification — map vulnerability to execution path, define gold findings per path, cross-reference against patch diff; (d) human verification against original CVE and patch.
-6. **Intermediate layer evaluation.** LLM constructs high-quality intermediate evaluation datasets for each Step 1-3, enabling per-step quality measurement.
+2. **Project-level, known scenario match.** Data collection targets project-level codebases where known scenario-based vulnerabilities can be matched. Single-file fixtures, function-level snippets, and hand-extracted vulnerable code are not valid evaluation inputs.
+3. **Vulnerable repo clone is mandatory.** Every dataset entry begins by cloning the upstream repository at the vulnerable commit. Labeling, gold construction, and evaluation are all performed against the cloned source tree. CVE text and patches are reasoning inputs; they never replace the source.
+4. **Self-contained source.** The entire analysis and evaluation pipeline must operate on the project's source code alone. Projects that depend on external codebases (shared libraries from other repos, kernel headers not included) or specific hardware environments (HSM coprocessors, proprietary boot ROMs) are not suitable.
+5. **Right-sized projects.** Project-level but not too large. Linux-kernel-scale projects and similarly massive codebases are out of scope. The target zone is "non-trivially-sized but cloneable, buildable, and analyzable end-to-end".
+6. **Full codebase clone, not a subset.** Evaluation operates on the entire cloned project, not extracted files or curated subsets.
+7. **CVE patch-driven label construction.** When a CVE does not come with labels in Check Me's required format, construct them through: (a) clone vulnerable repo at vulnerable commit; (b) CVE patch analysis against the cloned tree — read fix commit and parent, identify changed functions, added guards, modified state variables with file:line references that resolve in the clone; (c) attack scenario research — public exploit write-ups, vendor advisories — mapped onto cloned source; (d) LLM-assisted label construction with strict verification — map vulnerability to execution path, define gold findings per path, cross-reference against patch diff and cloned source; (e) human verification against original CVE, patch, and cloned source. file:line references in labels must resolve in the clone.
+8. **Intermediate layer evaluation.** LLM constructs high-quality intermediate evaluation datasets for each Step 1-3, enabling per-step quality measurement.
 
 ---
 
