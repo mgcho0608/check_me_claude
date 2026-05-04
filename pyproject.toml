@@ -15,6 +15,12 @@ dependencies = [
   # the host library path for non-default installs.
   "clang>=18,<19",
   "jsonschema>=4.0",
+  # LLM client wire format. Any OpenAI-compat provider (Gemini, Qwen via
+  # OpenRouter, Anthropic shim, vLLM, …) speaks this SDK.
+  "openai>=1.40,<2",
+  # Loads .env files in dev. In prod the env vars come from the
+  # deployment system and python-dotenv stays out of the way.
+  "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

@@ -31,6 +31,7 @@ Step 4: 선들을 엮어 도형     — 공격 시나리오
 - 설계 기준서: [PLAN.md](./PLAN.md) — source of truth
 - 에이전트 행동규칙: [CLAUDE.md](./CLAUDE.md)
 - 데이터셋 라벨링 SOP: [datasets/WORKFLOW.md](./datasets/WORKFLOW.md)
+- LLM provider 설정 (Step 2/3/4): [docs/LLM_CONFIG.md](./docs/LLM_CONFIG.md)
 - JSON schemas: [schemas/](./schemas/)
 - 데이터셋: [datasets/](./datasets/)
 
