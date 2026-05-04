@@ -403,6 +403,181 @@ def test_socketpair_marks_function_as_ipc_endpoint(tmp_path):
     ), rows
 
 
+# ---------- shared global state (pass B) ----------
+
+
+def test_function_reading_shared_mutable_array_is_trust_boundary(tmp_path):
+    """A non-const top-level array is a shared mutable byte-level
+    container. Any function reading it is a trust_boundary
+    candidate (kind=shared_global_read), regardless of whether the
+    extractor can statically prove that the bytes were attacker-
+    written. The verifier critiques each candidate independently
+    with burden of proof; if the global is in fact a session
+    counter the verifier quarantines."""
+    rows = _tb(
+        tmp_path,
+        """
+        char uip_buf[1500];
+        int reader(void) { return uip_buf[0]; }
+        """,
+    )
+    assert any(
+        r["function"] == "reader"
+        and r["kind"] == "shared_global_read"
+        and r["direction"] == "untrusted_to_trusted"
+        and "uip_buf" in r.get("note", "")
+        for r in rows
+    ), rows
+
+
+def test_const_global_does_not_trigger_shared_global_read(tmp_path):
+    """`const` qualifier excludes the global — config tables and
+    version strings are read-only and not shared mutable state."""
+    rows = _tb(
+        tmp_path,
+        """
+        const char version[] = "1.0";
+        int reader(void) { return version[0]; }
+        """,
+    )
+    sg = [r for r in rows if r["kind"] == "shared_global_read"]
+    assert sg == [], sg
+
+
+def test_scalar_global_does_not_trigger_shared_global_read(tmp_path):
+    """Scalar globals (int, char, ...) are typically counters /
+    flags, not byte-level state containers. Only array, struct,
+    union, or pointer-to-buffer types qualify."""
+    rows = _tb(
+        tmp_path,
+        """
+        int g_counter = 0;
+        int reader(void) { return g_counter; }
+        """,
+    )
+    sg = [r for r in rows if r["kind"] == "shared_global_read"]
+    assert sg == [], sg
+
+
+def test_struct_with_byte_buffer_field_triggers_shared_global_read(tmp_path):
+    """Mutable global struct that wraps a byte buffer (e.g.
+    ``struct request packetbuf`` with a ``char data[64]`` payload)
+    qualifies — the struct is the container for untrusted bytes."""
+    rows = _tb(
+        tmp_path,
+        """
+        struct buf { char data[64]; int len; };
+        struct buf packetbuf;
+        int reader(void) { return packetbuf.len; }
+        """,
+    )
+    assert any(
+        r["function"] == "reader"
+        and r["kind"] == "shared_global_read"
+        and "packetbuf" in r.get("note", "")
+        for r in rows
+    ), rows
+
+
+def test_struct_without_byte_buffer_field_does_not_trigger(tmp_path):
+    """A struct of int / pointer / non-byte fields is not a
+    network-buffer shape — likely a config table or stats record.
+    Excluded so the substrate doesn't fill with noise."""
+    rows = _tb(
+        tmp_path,
+        """
+        struct stats { int sent; int received; int errors; };
+        struct stats g_stats;
+        int reader(void) { return g_stats.sent; }
+        """,
+    )
+    sg = [r for r in rows if r["kind"] == "shared_global_read"]
+    assert sg == [], sg
+
+
+def test_array_of_non_byte_does_not_trigger(tmp_path):
+    """An array of ``int`` / ``long`` / ``double`` is a numeric
+    table, not a byte buffer — excluded."""
+    rows = _tb(
+        tmp_path,
+        """
+        int g_table[16];
+        int reader(void) { return g_table[0]; }
+        """,
+    )
+    sg = [r for r in rows if r["kind"] == "shared_global_read"]
+    assert sg == [], sg
+
+
+def test_byte_pointer_global_triggers_shared_global_read(tmp_path):
+    """Globals like ``uint8_t *cur_packet`` — pointer-to-byte that
+    other code dereferences — also qualify."""
+    rows = _tb(
+        tmp_path,
+        """
+        unsigned char *cur_packet;
+        int reader(void) { return cur_packet[0]; }
+        """,
+    )
+    assert any(
+        r["function"] == "reader" and r["kind"] == "shared_global_read"
+        for r in rows
+    ), rows
+
+
+def test_extern_decl_in_consumer_tu_still_picks_up_global(tmp_path):
+    """Cross-TU pattern: an ``extern`` declaration in a consumer
+    file is also a top-level VarDecl pointing at the same shared
+    global. We don't link across TUs; per-TU detection picks up
+    the extern decl as a shared global by its own type/qualifier
+    properties, so a reader function in that file still emits
+    shared_global_read."""
+    rows = _tb(
+        tmp_path,
+        """
+        extern char uip_buf[];
+        int reader(void) { return uip_buf[5]; }
+        """,
+    )
+    assert any(
+        r["function"] == "reader"
+        and r["kind"] == "shared_global_read"
+        for r in rows
+    ), rows
+
+
+def test_function_reading_local_array_is_not_a_trust_boundary(tmp_path):
+    """Local (function-scoped) arrays are not shared globals —
+    no other function can read or write them."""
+    rows = _tb(
+        tmp_path,
+        """
+        int reader(void) { char local[64]; return local[0]; }
+        """,
+    )
+    sg = [r for r in rows if r["kind"] == "shared_global_read"]
+    assert sg == [], sg
+
+
+def test_shared_global_note_lists_referenced_globals(tmp_path):
+    """The trust_boundary row's note should record which globals
+    the function actually reads — useful to the downstream
+    verifier and to humans auditing the substrate."""
+    rows = _tb(
+        tmp_path,
+        """
+        char buf_a[64];
+        char buf_b[64];
+        int reader(void) { return buf_a[0] + buf_b[0]; }
+        """,
+    )
+    sg = [r for r in rows if r["function"] == "reader"
+          and r["kind"] == "shared_global_read"]
+    assert len(sg) == 1, sg
+    note = sg[0].get("note", "")
+    assert "buf_a" in note and "buf_b" in note, note
+
+
 # ---------- negative cases ----------
 
 
