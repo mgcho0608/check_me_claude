@@ -360,6 +360,22 @@ Target: 3-5 project-level datasets with known scenario-based vulnerabilities bef
 8. **Schemas are versioned and `unknown` is always allowed.** Every gold artifact carries a `schema_version`. Every classification enum (trigger_type, sink_type, impact.category, etc.) reserves an `unknown` member. Cases that do not fit are recorded as `unknown` with a free-text note rather than force-fit into an existing label. Frequent `unknown` clusters trigger a schema-version bump and enum addition.
 9. **Intermediate layer evaluation.** LLM constructs high-quality intermediate evaluation datasets for each Step 1-3, enabling per-step quality measurement.
 
+10. **Label honesty: do not force-fit enum values to inflate gold-match.** Every gold row's `kind` enum (and every other enum field — `trigger_type`, `sink_type`, `direction`, etc.) must accurately describe what is at the cited file:line. If no enum value precisely fits, the row uses `unknown` with a free-text note (per #8) — *not* the closest-looking-but-incorrect enum. Force-fitting an enum value to make a row "hit" a gold-vs-extractor metric is a strictly worse outcome than `unknown`. The agent must, before committing gold, read each cited line and audit the row's enum against the line's actual content. Specific stretched-label patterns the agent must explicitly check against (this list grows as new patterns are caught):
+
+    a. `kind: "function_table"` (callback_registrations) only for static array initializers of function names. **Direct calls from a main loop or a protothread / event-dispatch macro are NOT function tables** — use `unknown` with a free-text note describing the actual dispatch shape.
+
+    b. `kind: "compile_flag"` (config_mode_command_triggers) only for `-D<NAME>` build flags recovered from `compile_commands.json` or equivalent (line: 0 by convention). **A regular C line inside an `#if` block is NOT a compile_flag row** — record the directive line itself with `kind: "ifdef"`. Whether the surrounding file is gated by a CMake-level option does not make every line in the file a compile_flag fact.
+
+    c. `kind: "cli_argument"` (config_mode_command_triggers) only for the CLI parser site (e.g. a `getopt` switch case). **A line where the CLI-gated behavior manifests downstream is NOT a cli_argument row** — use `unknown` with a free-text note describing the deployment-config dependency.
+
+    d. `kind: "structural_artifact"` (evidence_anchors) only for top-level structural facts (struct / typedef / enum / global / alias macro). **A statement-line write inside a function body is NOT a structural_artifact** — that information lives in `data_control_flow` (def_use, branch, loop). Do not duplicate it in evidence_anchors.
+
+    e. `sink_type: "memory_read"` / `"memory_write"` (attack_scenarios) only for lines that *perform that exact operation*. **A line that corrupts state, where the actual harmful read/write happens downstream, has `sink_type: "state_corruption"`** — the proximate effect at the cited line. The `impact.description` then makes the corruption → consequence chain explicit (e.g. "uip_len underflow at line 1846 → downstream consumers read past uip_buf").
+
+    f. `trigger_type: "callback"` (entrypoints) only for functions installed via a callback registration mechanism (function-pointer assignment, function table, signal handler, constructor attribute). **A regular internal call site, even if it is the structural pivot for downstream attack reasoning, is NOT a callback trigger** — use `unknown` with a free-text note describing why the function is kept as an entrypoint.
+
+When extending the schema or adding new enum members, add to this list any new patterns where the new member can be force-fit. Each item here is a specific failure caught in the corpus and recorded in the dataset's `notes.md` audit log so future labelers do not repeat it.
+
 ---
 
 ## 5. Migration Strategy
@@ -503,6 +519,17 @@ Single-file fixtures are useful for primitive unit tests but insufficient for pi
 
 ### Rule 11: Retrieval is deterministic, not LLM-chosen
 The code that Steps 3/4 LLM can see is determined by substrate edge-based N-hop neighborhood (N=2), not by LLM's free selection. This prevents the LLM from cherry-picking supportive evidence while ignoring contradictory code.
+
+### Rule 12: Implementation must be project-agnostic — no dataset-specific tunings
+Step 1's substrate extractor (and every subsequent extractor) must be project-agnostic. Implementation logic must never:
+
+- branch on dataset name / CVE / project name,
+- hardcode symbol patterns from specific CVEs in the test corpus (e.g. `PROCESS_THREAD`, `ssh_callback_data`, `tcpip_input`) into matching heuristics,
+- add suffixes / API-name lists / directory-name conventions that bias toward one project's style and away from the C standard / POSIX / widely shared CMake conventions.
+
+Heuristics must be principled (rooted in a language standard, an OS standard, or a broadly shared convention) and documented as such in their docstring. If a particular project's idiom needs special handling, the project's `metadata.json` carries the project-specific configuration (e.g. `-D` flags via `build_commands`); the extractor stays generic.
+
+Generality and intuitiveness are core values. **A lower gold-match across N datasets coming from honest extraction is strictly preferable to a higher gold-match coming from dataset-tuned heuristics.** Any heuristic added to "make dataset X match" without a principled language-level justification is a regression even when the test number goes up. When a generality audit catches such a tuning, it is removed and the metrics report records the (usually small) gold-match impact.
 
 ---
 

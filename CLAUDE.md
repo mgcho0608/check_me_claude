@@ -67,6 +67,19 @@
 - [ ] Step 1 substrate에 absence(없는 것)를 facts로 넣지 않음 (absence 관련 의미는 IR `conditions.blocking` 또는 `guards_missing`에 둠)
 - [ ] `notes.md` self-check 로그가 실제 검증 결과와 일치 (검증 안 한 항목을 "OK"로 적지 않음)
 
+#### Label-honesty 점검 (PLAN §4.6 #10) — gold 작성 후 별도 손 점검 패스
+
+라벨이 단지 "extractor와 매칭 잘 되게" 보이는 enum으로 force-fit되어 있지 않은지 직접 다시 확인. 점수 inflate가 잘못된 라벨보다 더 나쁘다. 이미 잡은 stretch 패턴들 (corpus가 자라며 추가):
+
+- [ ] `kind: "function_table"` 은 **static array of function names** 만. main-loop 직접 호출이나 protothread/event-dispatch 매크로는 **function table 아님** → `unknown` + free-text.
+- [ ] `kind: "compile_flag"` 은 **`-D<NAME>` 빌드 플래그** 만 (line: 0 관습). `#if` 블록 안 일반 C 라인은 `compile_flag` 행이 아님 → directive 라인을 `kind: "ifdef"` 로 기록.
+- [ ] `kind: "cli_argument"` 은 **CLI 파서 사이트** (예: `getopt` switch case) 만. CLI-gated 동작이 *발현되는* 라인은 cli_argument 행 아님 → `unknown` + free-text.
+- [ ] `kind: "structural_artifact"` (evidence_anchors) 은 **top-level 구조적 사실** 만 (struct / typedef / enum / global / alias 매크로). 함수 본문 안 statement 라인은 `data_control_flow` 의 def_use / branch / loop 가 다룸 — evidence_anchors에 중복 기재 금지.
+- [ ] `sink_type: "memory_read" | "memory_write"` 은 **그 라인이 정확히 그 동작을 수행할 때** 만. 해당 라인이 *상태를 corrupt*시키고 실제 harmful read/write가 downstream에서 일어난다면 `sink_type: "state_corruption"` 으로 기록 + `impact.description` 에 corruption→consequence 체인 명시.
+- [ ] `trigger_type: "callback"` (entrypoints) 은 **callback 등록 메커니즘으로 설치된 함수** 만 (function-pointer assignment / function table / signal handler / constructor attribute). 일반 내부 호출은 callback trigger 아님 — entrypoint로 *유지*하고 싶다면 `trigger_type: "unknown"` + free-text.
+
+스키마에 새 enum 추가 시 이 리스트도 함께 갱신 (어떤 패턴이 force-fit 가능한지 같이 적기).
+
 #### 보조 도구 사용은 허용, 단 결론은 직접
 
 - `grep`, `git show`, `git log` 같은 read-only 보조 도구는 **항목을 찾기 위해서만** 사용 가능.
@@ -81,6 +94,20 @@
 - 현재 구현보다 강한 claim을 문서에 쓰지 않는다.
 - 큰 변경은 단계적으로 — big-bang rewrite 금지.
 - LLM 합성 데이터를 평가의 ground truth로 쓰지 않는다.
+
+## 구현 일반성 (dataset-specific 금지) — PLAN §6 Rule 12
+
+Step 1 substrate extractor를 비롯한 모든 추출/분석 로직은 **반드시 project-agnostic** 이어야 한다. 다음을 절대 하지 않는다:
+
+- 데이터셋 이름 / CVE / 프로젝트 이름으로 분기.
+- 테스트 corpus의 특정 CVE에서 등장한 심볼 패턴 (예: `PROCESS_THREAD`, `ssh_callback_data`, `tcpip_input`) 을 매칭 휴리스틱에 hardcode.
+- 한 프로젝트의 명명 스타일에 맞춰 suffix / API 이름 / 디렉토리 이름 리스트를 추가 (C 표준 / POSIX / 일반적인 CMake 관습에서 벗어난 것).
+
+휴리스틱은 **principled** 해야 한다 — 언어 표준, OS 표준, 또는 광범위하게 공유되는 관습에 뿌리를 두고 docstring에 그 근거를 명시. 특정 프로젝트의 idiom에 적응이 필요하면 그 프로젝트의 `metadata.json` 의 `build_commands` 같은 곳에서 외부 설정으로 처리하지, 추출기 코드에 넣지 않는다.
+
+**범용성과 직관성은 핵심 가치**. dataset-tuned 휴리스틱으로 얻은 100% gold-match보다 정직한 추출로 얻은 75% gold-match가 strictly preferable. 새 휴리스틱을 추가할 때는 자문한다: "이 리스트/패턴이 우리 corpus 밖의 일반적인 C 코드에도 의미가 있는가, 아니면 dataset X를 잡으려고 좁게 만든 것인가?" 후자라면 즉시 generalize하거나 제거.
+
+이미 잡힌 사례: `callback_registrations.py` 의 `_is_function_pointer_type` suffix 리스트에 `_data` 가 들어가 있어 libssh의 `ssh_callback_data` 만 잡으려 한 적 있음 (`out/STAGE0_AUDIT_GENERALITY.md` 참조). `cursor.type.get_canonical()` 로 typedef를 expand하면 일반적으로 해결되는 문제였음. 이런 retrofit은 PR 단계에서 잡거나, 안 잡히면 audit 패스에서 잡아 제거.
 
 ## 프로젝트 경로
 - Repo root: `/home/user/check_me_claude`
