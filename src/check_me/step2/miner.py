@@ -52,13 +52,16 @@ DEFAULT_CHUNK_SIZE = 30
 
 # Concurrent miner / verifier calls. The OpenAI SDK is thread-safe;
 # the Gemini OpenAI-compat surface enforces a per-minute input-token
-# quota (2M/min on gemini-3-flash at the time of writing). With a
-# slice of ~100K tokens, 2 concurrent requests stay safely under
-# the quota; client.chat handles 429 RateLimitError with parsed
-# retry-delay backoff so spikes are recovered automatically. Raise
-# via the runner's ``miner_max_workers`` / ``verifier_max_workers``
-# kwargs if your provider's quota allows.
-DEFAULT_MAX_WORKERS = 2
+# quota (2M/min on gemini-3-flash at the time of writing).
+#
+# Default 1 = sequential dispatch. The miner's per-chunk input
+# (full substrate slice + chunk-specific user message) can run
+# 100-200K tokens on stack-style C codebases; even 2 concurrent
+# chunks burst past the per-minute quota when the slice is large.
+# Sequential dispatch naturally paces under quota and works
+# reliably across all dataset sizes. Raise via the runner's
+# ``miner_max_workers`` kwarg if your provider's quota allows.
+DEFAULT_MAX_WORKERS = 1
 
 
 # Default temperature for miner calls. PLAN proposer/verifier split:
@@ -183,39 +186,70 @@ def mine_chunked(
         len(chunks), chunk_size, max_workers,
     )
 
-    def _run_chunk(chunk_idx: int, chunk: list[str]) -> tuple[int, CallResult]:
-        result = mine(
-            client=client,
-            config=config,
-            slice_=slice_,
-            chunk=chunk,
-            max_retries=max_retries,
-            max_tokens_ceiling=max_tokens_ceiling,
-            min_max_tokens=min_max_tokens,
-            reasoning_effort=reasoning_effort,
-            temperature=temperature,
-            chat_fn=chat_fn,
-        )
-        return chunk_idx, result
+    def _run_chunk(chunk_idx: int, chunk: list[str]) -> tuple[int, CallResult | None, dict[str, Any] | None]:
+        """Run one miner chunk. On exception (e.g. exhausted 429
+        retry budget) return (idx, None, error_info) so the merge
+        loop can record the failure and proceed; the surviving
+        chunks still produce candidates and the run completes
+        instead of aborting on a single transient hiccup. PLAN
+        Rule 4: silent delete is forbidden — the per-chunk
+        diagnostic records the error so the operator can re-run."""
+        try:
+            result = mine(
+                client=client,
+                config=config,
+                slice_=slice_,
+                chunk=chunk,
+                max_retries=max_retries,
+                max_tokens_ceiling=max_tokens_ceiling,
+                min_max_tokens=min_max_tokens,
+                reasoning_effort=reasoning_effort,
+                temperature=temperature,
+                chat_fn=chat_fn,
+            )
+            return chunk_idx, result, None
+        except Exception as exc:  # noqa: BLE001 — capture-all is the design
+            err = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "step2.miner: chunk %d failed (%d candidates) — %s",
+                chunk_idx, len(chunk), err[:200],
+            )
+            return chunk_idx, None, {"error": err[:300], "chunk_size": len(chunk)}
 
     chunk_results: list[CallResult | None] = [None] * len(chunks)
+    chunk_errors: dict[int, dict[str, Any]] = {}
     if max_workers <= 1 or len(chunks) <= 1:
         for i, chunk in enumerate(chunks):
-            _, r = _run_chunk(i, chunk)
+            _, r, err = _run_chunk(i, chunk)
             chunk_results[i] = r
+            if err is not None:
+                chunk_errors[i] = err
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futs = [ex.submit(_run_chunk, i, c) for i, c in enumerate(chunks)]
             for f in futs:
-                idx, r = f.result()
+                idx, r, err = f.result()
                 chunk_results[idx] = r
+                if err is not None:
+                    chunk_errors[idx] = err
 
-    # Merge and dedupe by (function, file).
+    # Merge and dedupe by (function, file). Failed chunks contribute
+    # zero candidates but their failure is recorded in per_chunk_diag.
     merged: list[dict[str, Any]] = []
     seen: set[tuple[str | None, str | None]] = set()
     per_chunk_diag: list[dict[str, Any]] = []
     for i, r in enumerate(chunk_results):
-        assert r is not None
+        if r is None:
+            err_info = chunk_errors.get(i, {"error": "unknown"})
+            per_chunk_diag.append({
+                "chunk_index": i,
+                "chunk_size": err_info.get("chunk_size", len(chunks[i]) if i < len(chunks) else 0),
+                "proposed": 0,
+                "kept_after_dedupe": 0,
+                "ok": False,
+                "error": err_info.get("error", "unknown"),
+            })
+            continue
         proposed = r.parsed.get("candidates", []) if r.parsed else []
         chunk_keep = 0
         for cand in proposed:
@@ -230,6 +264,7 @@ def mine_chunked(
             "chunk_size": len(chunks[i]),
             "proposed": len(proposed),
             "kept_after_dedupe": chunk_keep,
+            "ok": True,
             "attempts": r.attempts,
         })
 

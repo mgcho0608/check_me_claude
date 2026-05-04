@@ -217,6 +217,36 @@ def test_chunked_miner_empty_candidates_returns_empty_list():
     assert result.per_chunk == []
 
 
+def test_chunked_miner_failed_chunk_does_not_abort_run():
+    """A single chunk's exception (e.g. exhausted 429 retry budget)
+    must NOT propagate through ``mine_chunked`` and abort the run.
+    Surviving chunks contribute their candidates; the failed chunk
+    is recorded in ``per_chunk`` with ``ok=False`` so the operator
+    can re-run."""
+    s = _slice_with_candidates(["a", "b", "c", "d"])
+
+    def flaky_chat(client, config, request: ChatRequest) -> ChatResponse:
+        user = request.messages[-1]["content"]
+        first = next(line[2:].strip() for line in user.splitlines() if line.startswith("- "))
+        # Fail on chunk starting with "c" (the third chunk under
+        # chunk_size=1); succeed on others.
+        if first == "c":
+            raise RuntimeError("simulated 429 retry budget exhausted")
+        return _resp(_miner_resp([_row(first)]))
+
+    result = miner_mod.mine_chunked(
+        client="dummy", config=_cfg(), slice_=s,
+        chunk_size=1, max_workers=1, chat_fn=flaky_chat,
+    )
+
+    funcs = sorted(c["function"] for c in result.parsed["candidates"])
+    # 'c' fails — the other three survive.
+    assert funcs == ["a", "b", "d"], funcs
+    failed = [d for d in result.per_chunk if not d.get("ok", True)]
+    assert len(failed) == 1
+    assert "simulated" in failed[0]["error"]
+
+
 def test_chunked_miner_parallel_path_preserves_id_order_by_file():
     """With max_workers > 1 chunks finish in non-deterministic
     order, but the merged candidate list is sorted by (file,
