@@ -1,8 +1,9 @@
 """Project-agnostic substrate slicing for Step 2 input.
 
 A real project's substrate JSON has too much detail to feed to an
-LLM directly: contiki-ng's substrate has 30k+ data_control_flow
-rows. The miner only needs the *candidate-relevant* subset:
+LLM directly: an OS-stack-scale C codebase routinely produces 30k+
+data_control_flow rows. The miner only needs the
+*candidate-relevant* subset:
 
 - every ``trust_boundaries`` row (every function syntactically
   taking external input is a candidate),
@@ -111,9 +112,10 @@ def slice_substrate(
     max_call_edges, max_guards, max_anchors
         Soft caps for the call_graph / guards / evidence_anchors
         portions of the slice. The cap is necessary for very large
-        codebases (contiki-ng's call_graph is 15k edges); the cap
-        kicks in only after the candidate-relevant rows are
-        retained, so it never drops something the miner needs.
+        codebases (we have observed 15k+ call edges on full IoT
+        stacks); it kicks in only after the candidate-relevant
+        rows are retained, so it never drops something the miner
+        needs.
 
     Notes
     -----
@@ -256,6 +258,20 @@ def slice_for_candidate(
     - evidence_anchors and config_mode_command_triggers in
       ``candidate_file`` only (small, cheap per-file context).
 
+    Same-name disambiguation: when ``candidate_file`` is supplied,
+    rows that name the candidate function are matched on
+    ``(function, file)`` together. C codebases routinely have
+    multiple ``static`` definitions sharing a function name across
+    translation units — a high-level API stub in one file and the
+    low-level handler with the same name in another is a common
+    layering pattern. Without file disambiguation, evidence about
+    the unrelated overload leaks into the verifier's slice. Edges'
+    ``file`` field pins the *call site*, so caller-side matches are
+    file-disambiguated but callee-side matches stay name-only (the
+    candidate is already file-identified by its definition; we
+    want to see everything it calls regardless of where the call
+    happens).
+
     The selection rule is project-agnostic — it walks substrate
     fields the schema defines, never special-cases a project name
     or symbol pattern.
@@ -274,23 +290,39 @@ def slice_for_candidate(
 
     same_file = (lambda f: f == candidate_file) if candidate_file else (lambda f: False)
 
+    def _is_candidate(row: dict[str, Any], name_field: str) -> bool:
+        """Match a row to the candidate by ``(name, file)`` when
+        ``candidate_file`` is set, falling back to name-only when it
+        isn't. Rows without a ``file`` field still match on name."""
+        if row.get(name_field) != candidate_function:
+            return False
+        if candidate_file is None:
+            return True
+        rf = row.get("file")
+        return rf is None or rf == candidate_file
+
     trust = [
         r for r in full.trust_boundaries
-        if r.get("function") == candidate_function or same_file(r.get("file"))
+        if _is_candidate(r, "function")
+        or (r.get("function") != candidate_function and same_file(r.get("file")))
     ]
     callbacks = [
         r for r in full.callback_registrations
-        if r.get("callback_function") == candidate_function
-        or r.get("function") == candidate_function
-        or same_file(r.get("file"))
+        if _is_candidate(r, "callback_function")
+        or _is_candidate(r, "function")
+        or (
+            r.get("callback_function") != candidate_function
+            and r.get("function") != candidate_function
+            and same_file(r.get("file"))
+        )
     ]
     edges = [
         e for e in full.call_graph
-        if e.get("caller") == candidate_function or e.get("callee") == candidate_function
+        if _is_candidate(e, "caller") or e.get("callee") == candidate_function
     ]
     guards = [
         g for g in full.guards
-        if g.get("function") == candidate_function
+        if _is_candidate(g, "function")
     ]
     anchors = [a for a in full.evidence_anchors if same_file(a.get("file"))]
     cfg = [t for t in full.config_mode_command_triggers if same_file(t.get("file"))]

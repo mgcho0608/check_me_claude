@@ -308,6 +308,69 @@ def test_slice_for_candidate_significantly_smaller_than_full():
     assert focused_size < full_size
 
 
+def test_slice_for_candidate_disambiguates_same_name_overloads():
+    """A C codebase often has two ``static`` functions sharing a
+    name across translation units (a high-level API stub in one
+    file and a low-level handler in another). When ``candidate_file``
+    is supplied, ``slice_for_candidate`` must keep evidence about
+    *only* that file's overload — leaking the other overload's
+    rows would defeat the verifier's job."""
+    from check_me.step2.substrate_slice import slice_for_candidate
+
+    sub = _empty_substrate()
+    # Two functions named "foo" in different files (the libssh-style
+    # case but expressed generically — no project-specific names).
+    sub["categories"]["trust_boundaries"] = [
+        # Overload A — in api.c. Has a network-socket trust boundary.
+        {"kind": "network_socket", "function": "foo",
+         "file": "api.c", "line": 100, "direction": "untrusted_to_trusted"},
+        # Overload B — in handler.c. Has a file_read trust boundary
+        # (irrelevant to overload A).
+        {"kind": "file_read", "function": "foo",
+         "file": "handler.c", "line": 200, "direction": "untrusted_to_trusted"},
+    ]
+    sub["categories"]["callback_registrations"] = [
+        # Only overload A is registered as a callback.
+        {"registration_site": "table[]", "callback_function": "foo",
+         "file": "api.c", "line": 50, "kind": "function_table"},
+    ]
+    sub["categories"]["call_graph"] = [
+        # Caller=foo edge in api.c (overload A's body).
+        {"caller": "foo", "callee": "helper_a",
+         "file": "api.c", "line": 110, "kind": "direct"},
+        # Caller=foo edge in handler.c (overload B's body) —
+        # MUST NOT appear in overload A's slice.
+        {"caller": "foo", "callee": "helper_b",
+         "file": "handler.c", "line": 210, "kind": "direct"},
+    ]
+    sub["categories"]["guards"] = [
+        {"function": "foo", "file": "api.c", "guard_call": "x>0",
+         "guard_line": 105, "result_used": True},
+        # Overload B's guard — must not leak into A's slice.
+        {"function": "foo", "file": "handler.c", "guard_call": "y!=0",
+         "guard_line": 205, "result_used": True},
+    ]
+    full = slice_substrate(sub)
+
+    focused = slice_for_candidate(full,
+                                  candidate_function="foo",
+                                  candidate_file="api.c")
+
+    # trust_boundaries: only the api.c overload's row.
+    tb_files = sorted({r["file"] for r in focused.trust_boundaries
+                       if r.get("function") == "foo"})
+    assert tb_files == ["api.c"], tb_files
+
+    # call_graph: only edges where caller=foo lives in api.c.
+    foo_caller_files = sorted({e["file"] for e in focused.call_graph
+                               if e.get("caller") == "foo"})
+    assert foo_caller_files == ["api.c"], foo_caller_files
+
+    # guards: only the api.c-side guard.
+    guard_files = sorted({g["file"] for g in focused.guards})
+    assert guard_files == ["api.c"], guard_files
+
+
 def test_no_dataset_specific_branching():
     """The slicer must not behave differently for any specific
     project name. Same logical input + different project name →

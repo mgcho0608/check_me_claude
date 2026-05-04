@@ -11,9 +11,9 @@ Per PLAN.md §0 / §5 Stage 1:
 - Final output is ``entrypoints.v1.json`` matching the schema, with
   candidates split into ``kept`` and ``quarantined`` statuses.
 
-The substrate is potentially huge (tens of thousands of rows for a
-project the size of contiki-ng). ``substrate_slice`` distills it to
-the candidate-relevant subset before either prompt sees it. This
+The substrate is potentially huge (tens of thousands of rows for
+large IoT-stack codebases). ``substrate_slice`` distills it to the
+candidate-relevant subset before either prompt sees it. This
 slicing is project-agnostic — it relies only on substrate categories,
 not on dataset names or known symbol patterns.
 """

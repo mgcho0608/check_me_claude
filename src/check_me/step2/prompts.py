@@ -74,7 +74,19 @@ Hard constraints:
 - Do NOT use dataset-specific knowledge. Reason only from the
   substrate slice provided in this conversation.
 - A function reached only by an internal direct call (not registered
-  under any trigger) is NOT an entrypoint — skip it.
+  under any trigger) is NOT an entrypoint — skip it. EXCEPTION: an
+  indexed-dispatch function (one that selects a registered handler
+  from a table by attacker-controlled bytes — e.g.
+  `handlers[wire_byte](args)`, syscall-table dispatch, event-loop
+  fan-out by message type) IS an entrypoint even though reached by
+  internal call. Recognise it from the substrate as: a function
+  appearing as `caller` in several `call_graph` edges of `kind:
+  indirect` whose `callee` set overlaps with functions present in
+  `callback_registrations`. Propose such a function with
+  trigger_type=unknown and trigger_ref noting "indexed dispatcher
+  over <table-name>". This pattern is generic to any C codebase
+  (protocol parsers, syscall tables, event loops, vtables driven
+  by external bytes); it is not project-specific.
 - A function on the egress / output side (e.g. send-only API wrappers)
   is NOT an entrypoint — skip it.
 - Be selective. Real-world projects have many trust_boundaries and
@@ -215,14 +227,34 @@ Hard constraints:
 - Reply with a single JSON object — no prose, no markdown fences.
 - Do not invent file paths or line numbers; cite only what the
   substrate slice contains.
-- "Quarantined" is the appropriate verdict for: candidates on the
-  wrong direction (egress instead of ingress), candidates whose
-  reachability requires assumptions outside the substrate's
-  evidence, candidates whose attacker_controllability is
-  speculative.
-- Be willing to quarantine. False positives in the kept bucket
-  pollute downstream Step 3; false negatives in quarantine are
-  recoverable from audit. PLAN §6 Rule 4.
+- The default verdict is "quarantined". "kept" carries the burden
+  of proof: it requires positive substrate evidence that BOTH
+  (a) the function is actually invoked by an untrusted external
+  trigger at runtime — not merely that it touches an
+  attacker-relevant API in isolation, AND
+  (b) the attacker can shape the bytes the function consumes.
+  Absence of refuting evidence is NOT sufficient — speculative
+  reachability or speculative controllability means quarantine.
+  False positives in the kept bucket pollute downstream Step 3;
+  false negatives in quarantine are recoverable from audit. PLAN §6
+  Rule 4.
+
+- Quarantine, in particular, these common false-positive shapes
+  (all generic — they recur in any C codebase, not specific to
+  any project in our corpus):
+  * functions that read files / env vars / stdin but whose only
+    callers are local administration paths (config-file parsers,
+    key/cert loaders, CLI password prompts). These are trust
+    boundaries to a local attacker, but not the network attack
+    surface unless the substrate shows a network-driven caller.
+  * functions registered as callbacks whose registration site is
+    only reachable behind a debug-only / build-time-disabled
+    code path (look for the registration site sitting under a
+    matching ifdef in evidence_anchors).
+  * functions on the egress / output side (send-only wrappers,
+    serialisers writing to a buffer, log emitters).
+  * candidates whose reachability is asserted only in prose with
+    no supporting substrate row.
 """
 
 _VERIFIER_OUTPUT_SHAPE = """\

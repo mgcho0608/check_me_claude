@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable
 
 from ..llm.client import ChatRequest, ChatResponse, chat
@@ -11,6 +12,18 @@ from .prompts import MINER_OUTPUT_SCHEMA, build_miner_messages
 from .substrate_slice import SubstrateSlice
 
 
+# Floor for the miner's first-attempt max_tokens budget. The shared
+# CHECK_ME_LLM_MAX_TOKENS default (4096) is too tight for the miner
+# on real projects: a 14-candidate response with reachability /
+# attacker_controllability prose runs ~9-10K tokens of visible JSON
+# alone, and Gemini 2.5/3 thinking tokens count against the same
+# ceiling. Without a floor, the first attempt always returns
+# finish_reason=length and burns one retry. 8192 lets the typical
+# response complete on the first try while still respecting any
+# higher value the operator set via env (we only raise, never lower).
+MIN_MINER_MAX_TOKENS = 8192
+
+
 def mine(
     client: Any,
     config: Config,
@@ -18,6 +31,7 @@ def mine(
     *,
     max_retries: int = 2,
     max_tokens_ceiling: int = 65536,
+    min_max_tokens: int = MIN_MINER_MAX_TOKENS,
     reasoning_effort: str | None = "low",
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:
@@ -32,6 +46,10 @@ def mine(
     tokens count against the response budget alongside the visible
     JSON output.
 
+    ``min_max_tokens`` is the first-attempt floor — see
+    :data:`MIN_MINER_MAX_TOKENS`. Operator env values higher than the
+    floor are respected; lower values are bumped up.
+
     ``reasoning_effort`` is plumbed through ``ChatRequest.extra`` so
     Gemini's OpenAI-compat layer caps its thinking budget. ``"low"``
     is the default — the miner does pattern selection over a
@@ -39,6 +57,8 @@ def mine(
     budget mostly squeezes out the visible output. Set ``None`` to
     let the provider pick.
     """
+    if config.max_tokens < min_max_tokens:
+        config = replace(config, max_tokens=min_max_tokens)
     system, user = build_miner_messages(slice_)
     extra: dict[str, Any] = {}
     if reasoning_effort is not None:
