@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mgcho0608/check_me_claude/schemas/entrypoints.v1.json",
+  "title": "Check Me Verified Entrypoints (Step 2)",
+  "description": "Entrypoints proposed by mining LLM and independently verified by a separate verifier LLM. Quarantined entries are preserved (no silent delete).",
+  "type": "object",
+  "required": ["schema_version", "project", "cve", "entrypoints"],
+  "properties": {
+    "schema_version": {"const": "v1"},
+    "project": {"type": "string"},
+    "cve": {"type": "string"},
+    "entrypoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "function", "file", "status", "trigger_type", "confidence"],
+        "properties": {
+          "id": {"type": "string"},
+          "function": {"type": "string"},
+          "file": {"type": "string"},
+          "line": {"type": ["integer", "null"]},
+          "status": {"enum": ["kept", "quarantined"]},
+          "trigger_type": {"enum": ["command", "config", "callback", "event", "boot_phase", "unknown"]},
+          "trigger_ref": {"type": ["string", "null"]},
+          "reachability": {"type": "string"},
+          "attacker_controllability": {"type": "string"},
+          "assumptions": {"type": "array", "items": {"type": "string"}},
+          "supporting_substrate_edges": {"type": "array", "items": {"type": "string"}},
+          "refuting_substrate_edges": {"type": "array", "items": {"type": "string"}},
+          "quarantine_reason": {"type": "string"},
+          "confidence": {"enum": ["high", "medium", "low"]},
+          "uncertainty": {"type": "string"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"status": {"const": "quarantined"}}},
+            "then": {"required": ["quarantine_reason"]}
+          }
+        ]
+      }
+    }
+  }
+}

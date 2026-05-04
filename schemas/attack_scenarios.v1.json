@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mgcho0608/check_me_claude/schemas/attack_scenarios.v1.json",
+  "title": "Check Me Attack Scenario (Step 4)",
+  "description": "Exploit chain woven from Evidence IR ids. Every scenario must include an exploit_chain and at least one sink.",
+  "type": "object",
+  "required": ["schema_version", "project", "cve", "attack_scenarios"],
+  "properties": {
+    "schema_version": {"const": "v1"},
+    "project": {"type": "string"},
+    "cve": {"type": "string"},
+    "attack_scenarios": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "exploit_chain", "sink", "impact", "verdict", "confidence"],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "exploit_chain": {
+            "type": "object",
+            "required": ["steps"],
+            "properties": {
+              "steps": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["order", "evidence_ir", "action", "result"],
+                  "properties": {
+                    "order": {"type": "integer"},
+                    "evidence_ir": {"type": "string"},
+                    "action": {"type": "string"},
+                    "result": {"type": "string"}
+                  }
+                }
+              }
+            }
+          },
+          "sink": {
+            "type": "object",
+            "required": ["function", "file", "sink_type"],
+            "properties": {
+              "function": {"type": "string"},
+              "file": {"type": "string"},
+              "line": {"type": ["integer", "null"]},
+              "evidence_ir_id": {"type": ["string", "null"]},
+              "sink_type": {"enum": ["memory_write", "memory_read", "command_execution", "auth_bypass", "crypto_misuse", "info_leak", "state_corruption", "resource_exhaustion", "unknown"]}
+            }
+          },
+          "impact": {
+            "type": "object",
+            "required": ["category", "description"],
+            "properties": {
+              "category": {"enum": ["memory_corruption", "privilege_bypass", "data_leak", "denial_of_service", "integrity_violation", "crypto_break", "unknown"]},
+              "description": {"type": "string"}
+            }
+          },
+          "verdict": {
+            "type": "object",
+            "required": ["exploitability"],
+            "properties": {
+              "exploitability": {"enum": ["high", "medium", "low", "unproven"]},
+              "reason": {"type": "string"}
+            }
+          },
+          "confidence": {"enum": ["high", "medium", "low"]},
+          "uncertainty": {"type": "string"}
+        }
+      }
+    }
+  }
+}

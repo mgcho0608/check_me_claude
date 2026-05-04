@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mgcho0608/check_me_claude/schemas/evidence_irs.v1.json",
+  "title": "Check Me Evidence IR (Step 3)",
+  "description": "Execution-path-conditioned evidence clusters. Every IR has an explicit entry point. Every claim carries file:line provenance.",
+  "type": "object",
+  "required": ["schema_version", "project", "cve", "evidence_irs"],
+  "properties": {
+    "schema_version": {"const": "v1"},
+    "project": {"type": "string"},
+    "cve": {"type": "string"},
+    "evidence_irs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "entrypoint", "runtime_context", "path", "confidence"],
+        "properties": {
+          "id": {"type": "string"},
+          "entrypoint": {
+            "type": "object",
+            "required": ["function", "file"],
+            "properties": {
+              "function": {"type": "string"},
+              "file": {"type": "string"},
+              "line": {"type": ["integer", "null"]}
+            }
+          },
+          "runtime_context": {
+            "type": "object",
+            "required": ["trigger_type"],
+            "properties": {
+              "trigger_type": {"enum": ["command", "config", "callback", "event", "boot_phase", "unknown"]},
+              "trigger_ref": {"type": ["string", "null"]},
+              "config_flags": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "path": {
+            "type": "object",
+            "required": ["nodes", "edges"],
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["function", "file", "role"],
+                  "properties": {
+                    "function": {"type": "string"},
+                    "file": {"type": "string"},
+                    "line": {"type": ["integer", "null"]},
+                    "role": {"enum": ["entry", "guard", "sink", "intermediate", "unknown"]}
+                  }
+                }
+              },
+              "edges": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["from", "to", "kind"],
+                  "properties": {
+                    "from": {"type": "string"},
+                    "to": {"type": "string"},
+                    "kind": {"enum": ["call", "dataflow", "controlflow", "callback", "config", "state", "unknown"]}
+                  }
+                }
+              }
+            }
+          },
+          "conditions": {
+            "type": "object",
+            "properties": {
+              "required": {"type": "array", "items": {"type": "string"}},
+              "blocking": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "evidence_anchors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["file", "line_start"],
+              "properties": {
+                "file": {"type": "string"},
+                "line_start": {"type": "integer"},
+                "line_end": {"type": ["integer", "null"]},
+                "note": {"type": "string"}
+              }
+            }
+          },
+          "confidence": {"enum": ["high", "medium", "low"]},
+          "uncertainty": {"type": "string"}
+        }
+      }
+    }
+  }
+}

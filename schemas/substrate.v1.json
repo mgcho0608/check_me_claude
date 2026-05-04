@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mgcho0608/check_me_claude/schemas/substrate.v1.json",
+  "title": "Check Me Substrate (Step 1)",
+  "description": "Deterministic substrate. 7 categories. No LLM-generated content. file:line references must resolve in datasets/<project>-<cve>/source/.",
+  "type": "object",
+  "required": ["schema_version", "project", "cve", "categories"],
+  "properties": {
+    "schema_version": {"const": "v1"},
+    "project": {"type": "string"},
+    "cve": {"type": "string"},
+    "categories": {
+      "type": "object",
+      "required": [
+        "call_graph",
+        "data_control_flow",
+        "guards",
+        "trust_boundaries",
+        "config_mode_command_triggers",
+        "callback_registrations",
+        "evidence_anchors"
+      ],
+      "properties": {
+        "call_graph": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["caller", "callee", "file", "line", "kind"],
+            "properties": {
+              "caller": {"type": "string"},
+              "callee": {"type": "string"},
+              "file": {"type": "string"},
+              "line": {"type": ["integer", "null"]},
+              "kind": {"enum": ["direct", "indirect", "virtual", "unknown"]}
+            }
+          }
+        },
+        "data_control_flow": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["function", "file", "kind", "summary"],
+            "properties": {
+              "function": {"type": "string"},
+              "file": {"type": "string"},
+              "kind": {"enum": ["def_use", "branch", "loop", "unknown"]},
+              "summary": {"type": "string"},
+              "line_start": {"type": ["integer", "null"]},
+              "line_end": {"type": ["integer", "null"]}
+            }
+          }
+        },
+        "guards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["function", "file", "guard_call", "result_used"],
+            "properties": {
+              "function": {"type": "string"},
+              "file": {"type": "string"},
+              "guard_call": {"type": "string"},
+              "guard_line": {"type": ["integer", "null"]},
+              "result_used": {"type": "boolean"},
+              "enforcement_line": {"type": ["integer", "null"]},
+              "note": {"type": "string"}
+            }
+          }
+        },
+        "trust_boundaries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "function", "file"],
+            "properties": {
+              "kind": {"enum": ["network_socket", "ipc_endpoint", "file_read", "external_io", "unknown"]},
+              "function": {"type": "string"},
+              "file": {"type": "string"},
+              "line": {"type": ["integer", "null"]},
+              "direction": {"enum": ["untrusted_to_trusted", "trusted_to_untrusted", "unknown"]},
+              "note": {"type": "string"}
+            }
+          }
+        },
+        "config_mode_command_triggers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "name", "file"],
+            "properties": {
+              "kind": {"enum": ["ifdef", "cli_argument", "mode_switch", "compile_flag", "unknown"]},
+              "name": {"type": "string"},
+              "file": {"type": "string"},
+              "line": {"type": ["integer", "null"]},
+              "note": {"type": "string"}
+            }
+          }
+        },
+        "callback_registrations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["registration_site", "callback_function", "file"],
+            "properties": {
+              "registration_site": {"type": "string"},
+              "callback_function": {"type": "string"},
+              "file": {"type": "string"},
+              "line": {"type": ["integer", "null"]},
+              "kind": {"enum": ["function_pointer_assignment", "signal_handler", "constructor", "function_table", "unknown"]},
+              "note": {"type": "string"}
+            }
+          }
+        },
+        "evidence_anchors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["file", "line", "kind"],
+            "properties": {
+              "file": {"type": "string"},
+              "line": {"type": "integer"},
+              "kind": {"enum": ["hardcoded_value", "key_reference", "magic_value", "structural_artifact", "unknown"]},
+              "note": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

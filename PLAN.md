@@ -309,7 +309,13 @@ The construction sequence is:
    - Define gold-standard findings per path (not per function)
    - Identify expected guard absence, missing enforcement, or state lifecycle gaps
    - Cross-reference against patch diff and cloned source to verify the label matches what the fix addresses and where it lives in the tree
-5. **Human verification** — Every LLM-constructed label must be reviewed against the original CVE, the patch, and the cloned source before entering the corpus. file:line references in labels must resolve in the cloned tree.
+5. **Agent self-check (no separate human reviewer)** — The agent that wrote the labels must perform a thorough verification pass before the corpus accepts them. Required checks:
+   - Every file:line reference resolves in the cloned source/ tree
+   - Every claim cross-references either a patch diff hunk, an authoritative source quote, or a concrete code excerpt in the clone
+   - Enum values match schema versions
+   - Step 4 attack scenarios contain ≥ 1 sink and an exploit chain that walks Evidence IR ids
+   - Every Evidence IR has an explicit entry point
+   The check is logged (notes.md or commit body) so reviewers can replay the reasoning.
 
 ### 4.3 Dataset collection approach
 
@@ -350,8 +356,9 @@ Target: 3-5 project-level datasets with known scenario-based vulnerabilities bef
 4. **Self-contained source.** The entire analysis and evaluation pipeline must operate on the project's source code alone. Projects that depend on external codebases (shared libraries from other repos, kernel headers not included) or specific hardware environments (HSM coprocessors, proprietary boot ROMs) are not suitable.
 5. **Right-sized projects.** Project-level but not too large. Linux-kernel-scale projects and similarly massive codebases are out of scope. The target zone is "non-trivially-sized but cloneable, buildable, and analyzable end-to-end".
 6. **Full codebase clone, not a subset.** Evaluation operates on the entire cloned project, not extracted files or curated subsets.
-7. **CVE patch-driven label construction.** When a CVE does not come with labels in Check Me's required format, construct them through: (a) clone vulnerable repo at vulnerable commit; (b) CVE patch analysis against the cloned tree — read fix commit and parent, identify changed functions, added guards, modified state variables with file:line references that resolve in the clone; (c) attack scenario research — public exploit write-ups, vendor advisories — mapped onto cloned source; (d) LLM-assisted label construction with strict verification — map vulnerability to execution path, define gold findings per path, cross-reference against patch diff and cloned source; (e) human verification against original CVE, patch, and cloned source. file:line references in labels must resolve in the clone.
-8. **Intermediate layer evaluation.** LLM constructs high-quality intermediate evaluation datasets for each Step 1-3, enabling per-step quality measurement.
+7. **CVE patch-driven label construction.** When a CVE does not come with labels in Check Me's required format, construct them through: (a) clone vulnerable repo at vulnerable commit; (b) CVE patch analysis against the cloned tree — read fix commit and parent, identify changed functions, added guards, modified state variables with file:line references that resolve in the clone; (c) attack scenario research — public exploit write-ups, vendor advisories — mapped onto cloned source; (d) LLM-assisted label construction with strict verification — map vulnerability to execution path, define gold findings per path, cross-reference against patch diff and cloned source; (e) agent self-check (file:line resolution, enum compliance, sink ≥ 1, IR entry-point present, claims tied to authoritative source or code excerpt) logged for replay. file:line references in labels must resolve in the clone.
+8. **Schemas are versioned and `unknown` is always allowed.** Every gold artifact carries a `schema_version`. Every classification enum (trigger_type, sink_type, impact.category, etc.) reserves an `unknown` member. Cases that do not fit are recorded as `unknown` with a free-text note rather than force-fit into an existing label. Frequent `unknown` clusters trigger a schema-version bump and enum addition.
+9. **Intermediate layer evaluation.** LLM constructs high-quality intermediate evaluation datasets for each Step 1-3, enabling per-step quality measurement.
 
 ---
 

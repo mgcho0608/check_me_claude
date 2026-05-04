@@ -13,10 +13,10 @@ build/
 .mypy_cache/
 .ruff_cache/
 
-# check_me 출력 아티팩트
+# 런타임 산출물 (schema/dataset 라벨/메타는 예외)
 *.json
-!rules/**/*.json
-!tests/**/*.json
+!schemas/**/*.json
+!datasets/**/*.json
 
 # 에디터
 .vscode/
