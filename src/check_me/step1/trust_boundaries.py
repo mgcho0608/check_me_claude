@@ -1,16 +1,15 @@
 """Trust-boundary extraction.
 
 A *trust boundary* in the substrate is a function whose body
-either directly invokes a known external-I/O API, or reads from a
-shared mutable global container that other functions may write
-into. Either is a point at which attacker- or environment-
-controlled bytes can cross into project code.
+directly invokes a known external-I/O API. The function is the
+syntactic boundary at which attacker- or environment-controlled
+bytes first cross into project code.
 
 Per ``schemas/substrate.v1.json`` the row is:
 
     {
       "kind": "network_socket" | "ipc_endpoint" | "file_read" |
-              "external_io" | "shared_global_read" | "unknown",
+              "external_io" | "unknown",
       "function": str,
       "file": str,
       "line": int,                      # function decl line
@@ -19,40 +18,20 @@ Per ``schemas/substrate.v1.json`` the row is:
       "note": str                       # short justification
     }
 
-Two detection passes, both rule-based:
-
-A. Direct syscall invocation. A curated map of POSIX / common-
-   libc API names to ``(kind, direction)``. A function emits one
-   row per ``(kind, direction)`` it exercises (so a function that
-   does both ``recvmsg`` and ``sendmsg`` produces two rows: one
-   ``untrusted_to_trusted`` and one ``trusted_to_untrusted``, both
-   ``network_socket``).
-
-B. Shared global state. A function that reads any top-level
-   ``VarDecl`` whose type is array, struct, or pointer AND whose
-   ``const`` qualifier is not set is flagged as
-   ``kind=shared_global_read`` with ``direction=untrusted_to_trusted``.
-   Rationale: such globals are byte-level state containers
-   (``uip_buf``, ``packetbuf``, request buffers in event-loop
-   servers, embedded driver scratch areas, etc.) that other
-   functions write into — directly or through ``memcpy`` chains
-   from network/file syscalls. The verifier critiques each
-   candidate independently with burden of proof, so a global that
-   is actually a session counter or a const-style table will
-   quarantine; a global that does carry attacker-controlled bytes
-   will be kept. This pass is project-agnostic: the only inputs
-   are AST shape (top-level VarDecl, type kind, const qualifier)
-   and the existing API_TABLE direction map. C-standard global
-   state is the pattern; embedded / IoT / legacy network stacks
-   that hold buffers as module-level globals (rather than
-   encapsulated in struct fields) are the typical beneficiaries.
+Detection is rule-based: a curated map of POSIX / common-libc API
+names to ``(kind, direction)``. A function emits one boundary row
+per ``(kind, direction)`` it exercises (so a function that does
+both ``recvmsg`` and ``sendmsg`` produces two rows: one
+``untrusted_to_trusted`` and one ``trusted_to_untrusted``, both
+``network_socket``).
 
 Step 1's promise stays narrow: we record *syntactic* boundaries.
 Logical boundaries reached via callbacks, indirect dispatch, or
-project-internal abstraction are recovered downstream by joining
-this category's rows with the ``callback_registrations`` and
-``call_graph`` substrates; the join is a deterministic substrate
-operation, not LLM reasoning.
+project-internal abstraction (a function installed under a
+network-callback slot but which never itself calls ``recvmsg``) are
+recovered downstream by joining this category's rows with the
+``callback_registrations`` substrate; the join is a deterministic
+substrate operation, not LLM reasoning.
 """
 
 from __future__ import annotations
@@ -214,140 +193,6 @@ def _api_calls_in_function(fn: cx.Cursor) -> dict[tuple[str, str], list[tuple[st
     return out
 
 
-# --------------------------------------------------------------------------- #
-# Shared-global trust boundary (pass B)
-# --------------------------------------------------------------------------- #
-
-
-# Byte-sized integral type kinds — the element types of a "byte
-# buffer". These are the primitive types that hold raw network
-# packets, file bytes, or other untrusted serial data.
-_BYTE_TYPE_KINDS = frozenset({
-    cx.TypeKind.CHAR_S, cx.TypeKind.CHAR_U,
-    cx.TypeKind.SCHAR, cx.TypeKind.UCHAR,
-})
-
-
-def _is_byte_array(t: cx.Type) -> bool:
-    """An array (any array kind) whose element is a byte-sized
-    integer (char / unsigned char / int8_t / uint8_t)."""
-    if t.kind not in (
-        cx.TypeKind.CONSTANTARRAY,
-        cx.TypeKind.INCOMPLETEARRAY,
-        cx.TypeKind.VARIABLEARRAY,
-    ):
-        return False
-    elem = t.get_array_element_type().get_canonical()
-    return elem.kind in _BYTE_TYPE_KINDS
-
-
-def _is_byte_pointer(t: cx.Type) -> bool:
-    """A pointer to a byte-sized integer or to ``void``. ``void *``
-    is ubiquitous as a generic byte pointer (libc memcpy etc. take
-    ``void *``); including it captures projects that hold their
-    untrusted-buffer pointer as ``void *``."""
-    if t.kind != cx.TypeKind.POINTER:
-        return False
-    pointee = t.get_pointee().get_canonical()
-    return (
-        pointee.kind in _BYTE_TYPE_KINDS
-        or pointee.kind == cx.TypeKind.VOID
-    )
-
-
-def _record_contains_byte_buffer(t: cx.Type) -> bool:
-    """A struct/union whose declaration contains at least one
-    byte-array or byte-pointer field. Captures globals like
-    ``struct request packetbuf`` that wrap a byte payload."""
-    if t.kind != cx.TypeKind.RECORD:
-        return False
-    decl = t.get_declaration()
-    if decl is None:
-        return False
-    for child in decl.get_children():
-        if child.kind != cx.CursorKind.FIELD_DECL:
-            continue
-        ft = child.type.get_canonical()
-        if _is_byte_array(ft) or _is_byte_pointer(ft):
-            return True
-    return False
-
-
-def _is_shared_state_global(decl: cx.Cursor) -> bool:
-    """A top-level ``VarDecl`` that holds shared mutable byte-level
-    state — defined or declared (``extern``) at translation-unit
-    scope, not ``const``, type is one of:
-
-      - byte array (``char[N]`` / ``uint8_t[N]`` / ...)
-      - byte pointer (``char *`` / ``uint8_t *`` / ``void *``)
-      - struct/union that contains a byte-array or byte-pointer
-        field as a top-level member
-
-    This is narrow on purpose. The earlier broader version (any
-    non-const array/struct/pointer global) caught huge numbers of
-    config tables, ID lists, and arrays of non-byte numeric types
-    that are not realistic untrusted-byte containers; the verifier
-    quarantined them but the volume swamped the slice token budget
-    on large IoT-stack codebases. Restricting to byte-shaped types
-    matches the structural shape of actual network/serial buffers
-    while staying project-agnostic (no symbol-name pattern, no
-    project-name branch).
-
-    Both definitions and forward (``extern``) declarations qualify
-    so per-TU passes work across files: ``char uip_buf[1500]`` in
-    its defining TU and ``extern char uip_buf[]`` in any consumer
-    TU both pass."""
-    if decl.kind != cx.CursorKind.VAR_DECL:
-        return False
-    sem = decl.semantic_parent
-    if sem is None or sem.kind != cx.CursorKind.TRANSLATION_UNIT:
-        return False
-    t = decl.type.get_canonical()
-    if t.is_const_qualified():
-        return False
-    if _is_byte_array(t):
-        return True
-    if _is_byte_pointer(t):
-        return True
-    if _record_contains_byte_buffer(t):
-        return True
-    return False
-
-
-def _function_reads_globals(
-    fn: cx.Cursor, shared: set[str]
-) -> list[str]:
-    """Names of shared-state globals referenced anywhere inside
-    ``fn``'s body. Order is stable (sorted, deduped). The reference
-    can be a bare ``DECL_REF_EXPR`` (whole-buffer) or part of a
-    member-access / array-subscript expression — both reduce to a
-    DECL_REF_EXPR pointing at the global VarDecl."""
-    body_file = fn.extent.start.file.name if fn.extent.start.file else None
-    seen: set[str] = set()
-    for cur in fn.walk_preorder():
-        if cur.kind != cx.CursorKind.DECL_REF_EXPR:
-            continue
-        if cur.location.file is None or cur.location.file.name != body_file:
-            continue
-        ref = cur.referenced
-        if ref is None or ref.kind != cx.CursorKind.VAR_DECL:
-            continue
-        name = ref.spelling
-        if name in shared and name not in seen:
-            seen.add(name)
-    return sorted(seen)
-
-
-def _collect_shared_globals_in_tu(parsed: ParseResult) -> set[str]:
-    out: set[str] = set()
-    for top in parsed.tu.cursor.get_children():
-        if _is_shared_state_global(top):
-            n = top.spelling
-            if n:
-                out.add(n)
-    return out
-
-
 def _is_main_with_argv(fn: cx.Cursor) -> bool:
     """C standard ``int main(int argc, char *argv[])`` — argv is the
     canonical command-line attacker-controlled input. Project-
@@ -365,7 +210,6 @@ def extract_trust_boundaries_from_tu(
     parsed: ParseResult, project_root: Path
 ) -> list[TrustBoundary]:
     project_root_abs = str(project_root.resolve())
-    shared_globals = _collect_shared_globals_in_tu(parsed)
     out: list[TrustBoundary] = []
     for fn, rel in iter_function_defs(parsed.tu, project_root_abs):
         assert rel is not None
@@ -399,22 +243,6 @@ def extract_trust_boundaries_from_tu(
                     note="argv of main() — command-line input is attacker-controlled",
                 )
             )
-
-        if shared_globals:
-            reads = _function_reads_globals(fn, shared_globals)
-            if reads:
-                sample = ", ".join(reads[:3])
-                extra = "" if len(reads) <= 3 else f" (+{len(reads) - 3} more)"
-                out.append(
-                    TrustBoundary(
-                        kind="shared_global_read",
-                        function=fn_name,
-                        file=rel,
-                        line=fn_line,
-                        direction="untrusted_to_trusted",
-                        note=f"reads shared mutable globals: {sample}{extra}",
-                    )
-                )
     return out
 
 
