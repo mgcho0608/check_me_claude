@@ -17,6 +17,9 @@
 - Proposer와 Verifier는 **별개 LLM 인스턴스**. Proposer의 reasoning을 Verifier에게 노출 금지 (anchoring 방지).
 - Verifier는 structured critique schema 따름: reachability / attacker-controllability / assumptions / refutable substrate edges.
 - 낮은 신뢰도의 entrypoint는 silent delete 금지 — `status: quarantined`로 보존, audit 가능.
+- **Lossless propagation 원칙**: miner는 substrate slice의 모든 `candidate_functions`에 대해 row를 emit하고, 추가로 substrate 패턴(indexed-dispatch 등)으로 발견한 entrypoint도 emit. selection이 아니라 reasoning 적용이 본질. verifier가 모든 row를 anchoring-blind하게 critique. Step 3 default 입력은 `status: kept` 행이며, `quarantined`는 audit/보강 dip용.
+- **Chunked miner**: 후보를 고정 크기(default 30)로 분할해 chunk별 fresh LLM 세션. 각 chunk에 (a) 명시 후보 명단 — 한 후보당 한 row 강제 + (b) cross-chunk discovery 단락 동시 첨부. merged output dedup는 `(function, file)` 키. parallel ThreadPool 실행 (default 4 workers).
+- **Temperature split**: miner default 0.1 (recall/discovery), verifier default 0.0 (rigorous + 결정론). 이는 PLAN Rule 2b의 proposer/verifier 분업의 자연스러운 따름.
 
 ### Step 3 (Evidence IR)
 - Retrieval은 결정론적: substrate edge 기반 N-hop neighborhood, **N=2 hybrid** (call edges + 1차 set이 read/write하는 shared global state를 함께 다루는 함수).

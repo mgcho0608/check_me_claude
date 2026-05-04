@@ -41,28 +41,76 @@ from .substrate_slice import SubstrateSlice
 
 _MINER_SYSTEM = """\
 You are a security-analysis assistant doing entrypoint mining for a
-deterministic substrate extractor. The user gives you a JSON
-"substrate slice" describing a C/C++ project's known trust
-boundaries, callback registrations, configuration triggers, a
-candidate-relevant call graph slice, guards on those functions, and
-file-level evidence anchors.
+deterministic substrate extractor. The user gives you:
 
-Your task: propose a list of *runtime entrypoint candidates* — the
-functions where attacker- or environment-controlled bytes most
-plausibly enter the project's code at runtime. For each candidate
-you must:
+  (1) a JSON "substrate slice" — full project context (trust
+      boundaries, callback registrations, configuration triggers,
+      call graph slice, guards, evidence anchors);
+  (2) an "assigned candidates" list — a chunk of function names
+      drawn from the slice's `candidate_functions` array. The full
+      candidate set is processed across multiple chunks in parallel;
+      this call handles only the chunk listed.
+
+Your task has two parts:
+
+PART A — Per-candidate enumeration (the recall guarantee).
+
+  For EVERY function name in the assigned candidates list, emit
+  exactly one candidate row. Skipping is NOT permitted. If you
+  doubt the entrypoint claim, still emit the row and let
+  `confidence: low` + `uncertainty` express the doubt — a
+  separate verifier LLM will critique each row independently with
+  burden of proof and quarantine weak claims with structured
+  refuting_substrate_edges. Picking which candidates "survive" is
+  the verifier's job, not yours; your job is to make sure the
+  verifier sees every candidate.
+
+  This division of labour is the foundation of Step 2: false
+  positives at your layer are recoverable (they land in the
+  quarantined bucket), false negatives are NOT — the verifier
+  never sees candidates you didn't propose.
+
+PART B — Cross-chunk discovery (the LLM value-add).
+
+  The deterministic substrate extractor (Step 1) emits
+  `candidate_functions` from the trust_boundaries and
+  callback_registrations categories. There are runtime entrypoints
+  it cannot mechanically detect — most importantly the
+  indexed-dispatch pattern, where a function selects a registered
+  handler from a table by attacker-controlled bytes (e.g.
+  `handlers[wire_byte](args)`, syscall-table dispatch, event-loop
+  fan-out by message type). Such a function is reached only by an
+  internal direct call from its parent, but it IS an entrypoint
+  because the attacker controls the dispatch index.
+
+  Recognise the pattern from the substrate as: a function
+  appearing as `caller` in several `call_graph` edges of `kind:
+  indirect` whose `callee` set overlaps with functions present in
+  `callback_registrations`. If you observe such a function (or any
+  other plausible entrypoint pattern) NOT already in the assigned
+  candidates list, emit a row for it too — propose it with
+  `trigger_type: unknown` and `trigger_ref` noting "indexed
+  dispatcher over <table-name>" (or whichever pattern applies).
+  Discovery instructions apply to every chunk: the merged miner
+  output dedupes by (function, file).
+
+  This pattern is generic to any C codebase (protocol parsers,
+  syscall tables, event loops, vtables driven by external bytes);
+  it is not project-specific.
+
+For each row you must:
 
 - name the function and pin its file + (where applicable) line,
 - pick a trigger_type from this fixed enum: command, config,
   callback, event, boot_phase, unknown. If none fits cleanly,
   use unknown and explain why in the trigger_ref text,
 - cite at least one supporting substrate row (its category and key
-  identifying fields) so a downstream verifier can audit the
-  reasoning,
+  identifying fields),
 - describe reachability — under what runtime conditions is this
   function reached? — and attacker_controllability — to what extent
   can an attacker shape the input by the time it arrives?
-- assign a confidence: high | medium | low,
+- assign a confidence: high | medium | low (this reflects YOUR
+  subjective strength on the entrypoint claim),
 - record uncertainty — what specifically you are unsure about and
   why.
 
@@ -73,44 +121,11 @@ Hard constraints:
   appear in the substrate slice.
 - Do NOT use dataset-specific knowledge. Reason only from the
   substrate slice provided in this conversation.
-- A function reached only by an internal direct call (not registered
-  under any trigger) is NOT an entrypoint — skip it. EXCEPTION: an
-  indexed-dispatch function (one that selects a registered handler
-  from a table by attacker-controlled bytes — e.g.
-  `handlers[wire_byte](args)`, syscall-table dispatch, event-loop
-  fan-out by message type) IS an entrypoint even though reached by
-  internal call. Recognise it from the substrate as: a function
-  appearing as `caller` in several `call_graph` edges of `kind:
-  indirect` whose `callee` set overlaps with functions present in
-  `callback_registrations`. Propose such a function with
-  trigger_type=unknown and trigger_ref noting "indexed dispatcher
-  over <table-name>". This pattern is generic to any C codebase
-  (protocol parsers, syscall tables, event loops, vtables driven
-  by external bytes); it is not project-specific.
-- A function on the egress / output side (e.g. send-only API wrappers)
-  is NOT an entrypoint — skip it.
-
-Recall mindset (proposer / verifier division of labour):
-
-- Your job is RECALL. A separate verifier LLM will independently
-  critique each candidate against the substrate and quarantine the
-  ones that don't survive scrutiny — a false positive at your
-  layer is recoverable (it lands in the quarantined bucket).
-  A false negative at your layer is NOT recoverable: the verifier
-  never sees candidates you didn't propose.
-- Concretely: propose ANY function that is plausibly a runtime
-  entrypoint given the substrate evidence — every callback target,
-  every distinct trust-boundary function, every plausible
-  indexed-dispatch function. Do not filter for "the most important
-  N"; lean inclusive. If two rows differ only structurally (same
-  function reached two ways), still produce ONE candidate that
-  acknowledges both routes in supporting_substrate_edges.
-- Numerical guidance: a typical project's slice surfaces 20-40
-  plausible candidates; very large projects (e.g. an OS-stack
-  codebase with hundreds of callback_registrations rows) can
-  warrant 60-80. Empty list is permitted only when the slice
-  genuinely contains no plausible entrypoint. Do not artificially
-  cap to a small number.
+- A function on the egress / output side (e.g. send-only API
+  wrappers, serialisers writing to a buffer) is NOT an
+  entrypoint — emit the row anyway with `confidence: low` and
+  `trigger_ref` noting the egress reasoning so the verifier can
+  quarantine on a clear refutation.
 """
 
 _MINER_OUTPUT_SHAPE = """\
@@ -144,13 +159,38 @@ warranted.
 
 def build_miner_messages(
     slice_: SubstrateSlice,
+    *,
+    chunk: list[str] | None = None,
 ) -> tuple[str, str]:
-    """Return ``(system, user)`` prompts for the miner."""
+    """Return ``(system, user)`` prompts for the miner.
+
+    ``chunk`` is the assigned-candidates list for this miner call —
+    a slice of ``slice_.candidate_functions``. The full candidate
+    set is processed across multiple chunks (each in a fresh LLM
+    session), and the merged output dedupes by ``(function, file)``.
+    When ``chunk`` is None, the miner is told to enumerate every
+    function in ``candidate_functions``; this is mainly a unit-test
+    backwards-compat path. Production runs always supply a chunk.
+    """
+    if chunk is None:
+        chunk_block = (
+            "Assigned candidates: every function name in the slice's"
+            " ``candidate_functions`` array (no chunking — single-call mode).\n\n"
+        )
+    else:
+        formatted = "\n".join(f"- {fn}" for fn in chunk)
+        chunk_block = (
+            f"Assigned candidates ({len(chunk)} function names — emit one"
+            " row each per Part A; also emit additional rows for any"
+            " cross-chunk discoveries per Part B):\n"
+            f"{formatted}\n\n"
+        )
     user = (
         "Substrate slice (Step 1 deterministic extractor output, restricted"
         " to candidate-relevant rows):\n\n"
         f"```json\n{slice_.to_json(indent=2)}\n```\n\n"
-        "Propose runtime entrypoint candidates. Output JSON only.\n\n"
+        + chunk_block
+        + "Output JSON only.\n\n"
         + _MINER_OUTPUT_SHAPE
     )
     return _MINER_SYSTEM, user

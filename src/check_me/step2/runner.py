@@ -15,12 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from ..llm.client import ChatRequest, ChatResponse, chat, make_client
 from ..llm.config import Config, StepKind, load_config
+from ..llm.json_call import CallResult
 from . import miner as miner_mod
 from . import verifier as verifier_mod
 from .substrate_slice import (
@@ -44,7 +46,7 @@ class RunReport:
     project: str
     cve: str
     slice_counts: dict[str, int]
-    miner_attempts: list[dict[str, Any]]
+    miner_chunks: list[dict[str, Any]]
     candidates_proposed: int
     verifier_calls: list[dict[str, Any]] = field(default_factory=list)
     kept: int = 0
@@ -64,9 +66,23 @@ def run(
     verifier_config: Config | None = None,
     miner_client: Any | None = None,
     verifier_client: Any | None = None,
+    miner_chunk_size: int = miner_mod.DEFAULT_CHUNK_SIZE,
+    miner_max_workers: int = miner_mod.DEFAULT_MAX_WORKERS,
+    verifier_max_workers: int = miner_mod.DEFAULT_MAX_WORKERS,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> tuple[dict[str, Any], RunReport]:
-    """Run Step 2 end-to-end.
+    """Run Step 2 end-to-end (lossless architecture).
+
+    Step 2's miner is chunked: every function in the substrate
+    slice's ``candidate_functions`` is sent through some chunk's
+    miner call. Each chunk also carries a discovery instruction so
+    the LLM can propose entrypoints outside the candidate set when
+    it spots cross-substrate patterns (indexed dispatchers etc.).
+    The merged candidate list is then verified — every row receives
+    an independent verifier critique with anchoring prevention.
+    Both miner chunks and verifier calls run in parallel via a
+    bounded thread pool (see ``miner_max_workers`` /
+    ``verifier_max_workers``).
 
     Configs and clients are optional — if not supplied, the runner
     loads them from the environment and constructs OpenAI SDK
@@ -96,30 +112,29 @@ def run(
         # so any client-side state is isolated).
         verifier_client = make_client(verifier_config)
 
-    # 1. Miner ---------------------------------------------------------------
+    # 1. Miner (chunked, parallel) -------------------------------------------
     logger.info("step2.miner: starting on slice %s", slice_.row_counts())
-    miner_result = miner_mod.mine(
+    miner_result = miner_mod.mine_chunked(
         client=miner_client,
         config=miner_config,
         slice_=slice_,
+        chunk_size=miner_chunk_size,
+        max_workers=miner_max_workers,
         chat_fn=chat_fn,
     )
     proposed: list[dict[str, Any]] = miner_result.parsed.get("candidates", [])
-    logger.info("step2.miner: produced %d candidate(s)", len(proposed))
+    logger.info(
+        "step2.miner: %d chunks -> %d unique candidate(s)",
+        len(miner_result.per_chunk), len(proposed),
+    )
 
-    # 2. Verifier ------------------------------------------------------------
-    final_entries: list[dict[str, Any]] = []
-    verifier_calls: list[dict[str, Any]] = []
-    kept = 0
-    quarantined = 0
-    for cand in proposed:
-        # Per PLAN §0 / Rule 2b the verifier critiques ONE candidate
-        # at a time. Sending the full project slice on every call
-        # would burn ~N × full_slice tokens; instead we hand it a
-        # focused per-candidate sub-slice (trust boundaries +
-        # callback registrations + 1-hop call graph involving the
-        # candidate + guards in the candidate function + per-file
-        # anchors / config triggers).
+    # 2. Verifier (parallel) -------------------------------------------------
+    # Per PLAN §0 / Rule 2b the verifier critiques ONE candidate at
+    # a time on a focused per-candidate sub-slice; the slice walk
+    # is a deterministic substrate operation, the verifier call is
+    # an LLM critique. Both run independently per candidate, so
+    # they parallelise naturally.
+    def _verify_one(cand: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], CallResult]:
         focused = slice_for_candidate(
             slice_,
             candidate_function=cand.get("function", ""),
@@ -132,20 +147,33 @@ def run(
             candidate=cand,
             chat_fn=chat_fn,
         )
-        verdict = v_result.parsed
+        return cand, v_result.parsed, v_result
+
+    final_entries: list[dict[str, Any]] = [None] * len(proposed)  # type: ignore[list-item]
+    verifier_calls: list[dict[str, Any]] = [None] * len(proposed)  # type: ignore[list-item]
+    kept = 0
+    quarantined = 0
+    if verifier_max_workers <= 1 or len(proposed) <= 1:
+        verdicts = [_verify_one(c) for c in proposed]
+    else:
+        with ThreadPoolExecutor(max_workers=verifier_max_workers) as ex:
+            futs = [(i, ex.submit(_verify_one, c)) for i, c in enumerate(proposed)]
+            verdicts_indexed = [(i, f.result()) for i, f in futs]
+            verdicts_indexed.sort(key=lambda p: p[0])
+            verdicts = [v for _, v in verdicts_indexed]
+
+    for i, (cand, verdict, v_result) in enumerate(verdicts):
         merged = _merge_candidate_verdict(cand, verdict)
-        final_entries.append(merged)
+        final_entries[i] = merged
         if merged["status"] == "kept":
             kept += 1
         else:
             quarantined += 1
-        verifier_calls.append(
-            {
-                "candidate_id": cand.get("id"),
-                "verdict": verdict.get("verdict"),
-                "attempts": v_result.attempts,
-            }
-        )
+        verifier_calls[i] = {
+            "candidate_id": cand.get("id"),
+            "verdict": verdict.get("verdict"),
+            "attempts": v_result.attempts,
+        }
 
     elapsed = time.monotonic() - start
 
@@ -159,7 +187,7 @@ def run(
         project=slice_.project,
         cve=slice_.cve,
         slice_counts=slice_.row_counts(),
-        miner_attempts=miner_result.attempts,
+        miner_chunks=miner_result.per_chunk,
         candidates_proposed=len(proposed),
         verifier_calls=verifier_calls,
         kept=kept,

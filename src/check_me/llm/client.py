@@ -18,12 +18,31 @@ shape variations) surface naturally through these fields.
 
 from __future__ import annotations
 
+import logging
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from .config import Config
+
+logger = logging.getLogger(__name__)
+
+
+# Maximum total wait, in seconds, that ``chat`` will spend retrying
+# 429 RateLimitError. Beyond this it gives up and lets the error
+# propagate. 600s = 10 min covers most published per-minute quotas.
+RATE_LIMIT_MAX_TOTAL_WAIT = 600
+
+# Number of 429 retries to attempt before giving up.
+RATE_LIMIT_MAX_RETRIES = 6
+
+# Floor wait between 429 retries when the provider doesn't include
+# a RetryInfo hint (or the hint can't be parsed). Exponential backoff
+# is applied on top of this floor.
+RATE_LIMIT_DEFAULT_BACKOFF = 5.0
 
 
 # --------------------------------------------------------------------------- #
@@ -67,12 +86,36 @@ def make_client(config: Config) -> OpenAI:
     return OpenAI(base_url=config.url, api_key=config.key)
 
 
+_RETRY_DELAY_RE = re.compile(
+    r"['\"]retryDelay['\"]\s*:\s*['\"](\d+)s['\"]"
+)
+
+
+def _parse_rate_limit_wait(err: RateLimitError) -> float:
+    """Best-effort extract of the provider's suggested retry delay
+    from a RateLimitError. Gemini's OpenAI-compat encodes a
+    ``retryDelay: <Ns>`` blob in the error body; if we can't find
+    one, fall back to ``RATE_LIMIT_DEFAULT_BACKOFF``."""
+    msg = str(err)
+    m = _RETRY_DELAY_RE.search(msg)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return RATE_LIMIT_DEFAULT_BACKOFF
+
+
 def chat(client: OpenAI, config: Config, request: ChatRequest) -> ChatResponse:
     """Issue a single Chat Completions call using ``client`` and the
     knobs from ``config``. Returns a flattened ``ChatResponse``.
 
-    No retry, no JSON parsing, no schema validation — those live in
-    ``json_call.py``. Keep this function dumb.
+    Handles HTTP 429 ``RateLimitError`` with provider-aware backoff:
+    parses the retry hint from the error body when available
+    (Gemini's OpenAI-compat embeds ``retryDelay: <Ns>``), waits, and
+    retries up to ``RATE_LIMIT_MAX_RETRIES``. Other transient errors
+    are left to the OpenAI SDK's own retry mechanism. JSON parsing
+    and schema validation live in ``json_call.py``.
     """
     kwargs: dict[str, Any] = {
         "model": config.model,
@@ -84,7 +127,37 @@ def chat(client: OpenAI, config: Config, request: ChatRequest) -> ChatResponse:
         kwargs["response_format"] = {"type": "json_object"}
     kwargs.update(request.extra)
 
-    completion = client.chat.completions.create(**kwargs)
+    total_waited = 0.0
+    attempt = 0
+    while True:
+        try:
+            completion = client.chat.completions.create(**kwargs)
+            break
+        except RateLimitError as exc:
+            attempt += 1
+            if attempt > RATE_LIMIT_MAX_RETRIES:
+                logger.warning(
+                    "chat: 429 retry budget exhausted (%d attempts, %.1fs total)",
+                    attempt - 1, total_waited,
+                )
+                raise
+            base_wait = _parse_rate_limit_wait(exc)
+            # Exponential backoff factor on top of the parsed hint —
+            # caps at 2x the hint to avoid waiting indefinitely if the
+            # provider keeps returning short hints under sustained load.
+            wait = min(base_wait * (1.5 ** (attempt - 1)), base_wait * 2)
+            if total_waited + wait > RATE_LIMIT_MAX_TOTAL_WAIT:
+                logger.warning(
+                    "chat: 429 total-wait budget would exceed %ds; giving up",
+                    RATE_LIMIT_MAX_TOTAL_WAIT,
+                )
+                raise
+            logger.info(
+                "chat: 429 backoff attempt %d, waiting %.1fs (total %.1fs)",
+                attempt, wait, total_waited + wait,
+            )
+            time.sleep(wait)
+            total_waited += wait
     raw = completion.model_dump()
     choice = raw["choices"][0]
     msg = choice.get("message") or {}

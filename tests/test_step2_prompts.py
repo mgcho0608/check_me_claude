@@ -57,6 +57,46 @@ def test_miner_schema_enumerates_trigger_types():
     assert set(enum) == {"command", "config", "callback", "event", "boot_phase", "unknown"}
 
 
+def test_miner_user_message_includes_chunk_block_when_provided():
+    """Chunked execution: each call gets an explicit assigned-
+    candidates list. Per Part A of the system prompt the miner
+    must emit one row per name in the chunk."""
+    sys, user = build_miner_messages(_slice(), chunk=["foo", "bar", "baz"])
+    assert "Assigned candidates" in user
+    assert "- foo" in user
+    assert "- bar" in user
+    assert "- baz" in user
+
+
+def test_miner_user_message_no_chunk_falls_back_to_full_set_instruction():
+    """Backwards-compat: when no chunk is supplied (small projects
+    / unit tests), the user message tells the miner to enumerate
+    every candidate_function in the slice."""
+    _, user = build_miner_messages(_slice())
+    assert "no chunking" in user.lower() or "single-call" in user.lower()
+
+
+def test_miner_system_forbids_skipping_assigned_candidates():
+    """Part A guarantee: every assigned candidate gets a row, even
+    if the miner doubts the entrypoint claim. Selection is the
+    verifier's job."""
+    sys, _ = build_miner_messages(_slice())
+    text = sys.lower()
+    # The prompt should explicitly call out that skipping is not
+    # permitted and the verifier handles weak claims.
+    assert "skipping is not permitted" in text or "skipping is not\n  permitted" in text
+
+
+def test_miner_system_includes_part_b_discovery_instruction():
+    """Part B guarantee: every chunk's call gets the discovery
+    instruction so cross-chunk indexed-dispatch patterns are not
+    dropped by chunking."""
+    sys, _ = build_miner_messages(_slice())
+    text = sys.lower()
+    assert "indexed-dispatch" in text or "indexed dispatch" in text
+    assert "discovery" in text
+
+
 # --------- candidate_for_verifier (anchoring prevention!) ------------
 
 

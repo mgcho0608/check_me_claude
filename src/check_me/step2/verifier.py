@@ -8,6 +8,7 @@ calling :func:`verify_one` (see ``prompts.candidate_for_verifier``).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable
 
 from ..llm.client import ChatRequest, ChatResponse, chat
@@ -22,6 +23,12 @@ from .prompts import (
 from .substrate_slice import SubstrateSlice
 
 
+# Verifier temperature default. The verifier is the rigorous-filter
+# half of the proposer/verifier split — same input + same evidence
+# should yield the same verdict. Determinism is its core property.
+DEFAULT_VERIFIER_TEMPERATURE: float = 0.0
+
+
 def verify_one(
     client: Any,
     config: Config,
@@ -31,6 +38,7 @@ def verify_one(
     max_retries: int = 2,
     max_tokens_ceiling: int = 16384,
     reasoning_effort: str | None = "minimal",
+    temperature: float | None = DEFAULT_VERIFIER_TEMPERATURE,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:
     """Verify a single candidate. ``candidate`` is the miner's full
@@ -39,7 +47,12 @@ def verify_one(
 
     ``reasoning_effort`` defaults to ``"minimal"`` — see
     :func:`check_me.step2.miner.mine` for the rationale.
+
+    ``temperature`` defaults to 0.0 — see
+    :data:`DEFAULT_VERIFIER_TEMPERATURE`.
     """
+    if temperature is not None and temperature != config.temperature:
+        config = replace(config, temperature=temperature)
     structural = candidate_for_verifier(candidate)
     system, user = build_verifier_messages(slice_, structural)
     extra = reasoning_extra(reasoning_effort)

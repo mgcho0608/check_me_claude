@@ -493,6 +493,17 @@ Entrypoint candidates are proposed by one LLM instance and verified by another.
 The proposer's reasoning is never shared with the verifier (anchoring prevention).
 The verifier uses a structured critique schema: reachability, attacker-controllability, assumptions, refutable substrate edges.
 
+**Lossless propagation through Step 2.** The miner is chunked: every function in the substrate slice's `candidate_functions` is sent through some chunk's miner call, and each chunk also carries an explicit cross-chunk discovery instruction (the indexed-dispatch pattern and equivalents — entries the deterministic Step 1 cannot mechanically detect). Per-chunk system prompt:
+
+- Part A: emit one row per assigned candidate. Skipping is not permitted; doubt is recorded as `confidence: low` + `uncertainty`. Selection is the verifier's job, not the miner's.
+- Part B: emit additional rows for any pattern-discoverable entrypoint outside the assigned list. Cross-chunk dedup is by `(function, file)`.
+
+After miner merge, every candidate is sent to the verifier independently. The verifier's burden of proof is on `kept`: positive substrate evidence of both reachability AND attacker-controllability is required. Anchoring prevention is enforced by stripping the miner's prose keys (reachability / attacker_controllability / uncertainty) before the verifier sees the row.
+
+Result: false negatives at the miner stage are bounded by the substrate (any function the substrate cannot link to runtime is still beyond Step 2's reach — a Step 1 boundary, not a Step 2 one). False positives are bounded by the verifier's burden-of-proof and quarantined per Rule 4.
+
+**Determinism.** Verifier temperature defaults to 0.0 — same input + same evidence → same verdict, run after run. Miner temperature defaults to 0.1 — proposer's creativity is preserved for cross-chunk discovery while keeping outputs reproducible-in-aggregate (chunk dedup absorbs minor variance).
+
 ### Rule 3: Confidence and uncertainty are mandatory
 Every LLM-generated field (Steps 2-4) must carry confidence and uncertainty. No exceptions. This is the mechanism by which downstream steps know when to re-read source code.
 
