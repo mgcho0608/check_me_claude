@@ -1,5 +1,19 @@
 # Stage 0, Slice 6 — evidence_anchors extractor
 
+> **Snapshot note**: this report records the Slice-6-time numbers, including a
+> GRAND TOTAL of 47/63 = 75% gold-row coverage. After Slice 6 the corpus went
+> through a label-honesty audit (round 2): 11 gold rows that force-fit enum
+> values were corrected to `unknown`-with-free-text or removed where they
+> duplicated other categories. The post-audit GRAND TOTAL is 47/58 = 81% —
+> see `out/STAGE0_AUDIT_GENERALITY.md` for the corrected numbers and the
+> per-row rationale.
+>
+> Stage 0 exit criterion 1 is also recorded here as ☐ deferred; it was closed
+> after this slice by `out/STAGE0_REGEX_BASELINE_METRICS.md` (with corrected
+> criterion wording — "Clang emits an indirect-edge class regex cannot
+> represent and is free of preprocessor-disabled-code false positives", not
+> "more edges than regex").
+
 Adds the 7th and final substrate category. Anchors are short
 pointers into source ("look at this line; here is the structural /
 numeric fact"). They give downstream Step 2 / 3 layers a place to

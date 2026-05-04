@@ -124,7 +124,7 @@ in-project filter; output determinism; output schema validation.
 
 ## Stage 0 exit-criteria status (PLAN.md §5)
 
-1. ☐ Regex-baseline edge-count comparison — deferred to Slice 5.
+1. ☐ Regex-baseline edge-count comparison — deferred to Stage 0 closure (eventually closed by `out/STAGE0_REGEX_BASELINE_METRICS.md`).
 2. ☐ All 7 substrate categories — **5/7** in this slice. Two
    remaining: config_mode_command_triggers, evidence_anchors.
 3. ☑ file:line provenance.

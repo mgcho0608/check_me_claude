@@ -5,11 +5,16 @@ Three kinds of fact, matching ``schemas/substrate.v1.json``:
 - ``branch``: ``if`` / ``switch`` constructs. Recorded with the line
   range of the construct and a short summary of the condition.
 - ``loop``: ``for`` / ``while`` / ``do-while`` constructs.
-- ``def_use``: a local ``VarDecl`` together with the *number* of
-  uses observed in the same function (the use-list itself is
-  summarized rather than enumerated, to keep the substrate JSON
-  bounded). Cross-function uses are out of scope for Step 1's
-  intra-procedural promise.
+- ``def_use``: two flavours, both emitted under the same kind:
+    1. each local ``VarDecl`` together with the *number* of uses
+       observed in the same function (use-list summarised rather
+       than enumerated, to keep substrate JSON bounded);
+    2. each assignment (``=``) and compound assignment
+       (``+=``/``-=``/...) with a one-line ``assign <written form>``
+       summary at the operator's line. The two flavours together
+       cover both "where local data lives" and "where data flows
+       between locations". Cross-function uses are out of scope
+       for Step 1's intra-procedural promise.
 
 Step 1 is deterministic: every if / switch / for / while / do-while
 in a project-local function definition produces one row.

@@ -9,13 +9,12 @@ Two flavors of edge are produced:
   pointer-typed expression as written (best-effort), and the edge is
   not resolved to a single target.
 
-Static function-pointer dispatch tables (e.g., libssh's
-``default_packet_handlers[]``, contiki-ng's
-``PROCESS_THREAD``-driven event dispatch) are also indexed: each
-initializer in such a table that names a function declaration becomes
-a ``kind: "function_table"`` *registration* in the table-index, which
-the callback_registrations extractor (Slice 3) will pick up. For
-Slice 1 we just record the dispatch site as ``indirect``.
+Indirect edges are intentionally left unresolved here. The
+``callback_registrations`` extractor records the function-pointer
+table installations and field-of-struct assignments that downstream
+layers can join with these indirect edges to recover the resolved
+target — this module's job is to faithfully record what the AST
+exposes at the call site, not to chase the dispatch.
 
 The output rows match the JSON shape required by
 ``schemas/substrate.v1.json#categories.call_graph``:

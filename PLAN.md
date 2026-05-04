@@ -662,23 +662,35 @@ That is the direction all implementation work must serve.
 
 ---
 
-## Appendix A: Current Infrastructure State (2026-04-28)
+## Appendix A: Current Pipeline State
 
-### Completed fixes (2026-04-28):
-- Gold file discovery: gold_*.json strategy added to benchmark_runner (stable 0→4, experimental 4→12)
-- Tier detection: EXPERIMENTAL and CANARY tiers added (all paths eval-enabled)
-- Ambiguity pilot: gold files renamed to uppercase-with-hyphen (4/4 discoverable)
-- Registry: counting_methodology documented, ambiguity_pilot mirror added
-- Fixture regen: ambiguity_pilot added to regen_[[fixtures.py](http://fixtures.py)](http://fixtures.py) canary mapping
+This appendix tracks the implemented portion of the 4-step pipeline. Updated as stages close.
 
-### Known issues (not blocking new architecture):
-- 23 failing tests (19 fixture missing from archive migration, 6 LLM mock config incomplete)
-- Code mode CWE416: no gold.json files (benchmark discovers 0 cases)
-- Schema validator: regex pattern check is dead code (silently passes)
-- 14 scripts reference stale paths (documented in path_redirects.json)
+### Stage 0 — Deterministic Substrate (✅ closed)
 
-### Artifact inventory:
-- Scenario mode: 35 discoverable cases (stable 4, experimental 12, ab_pilot 15, ambiguity_pilot 4)
-- Code mode: 120 CWE416 .c files (no gold, not benchmarkable)
-- Synthetic truth: 28 micro_truth cases
-- Ingest queue: 1096 .c files (raw, no metadata)
+- All 7 substrate categories implemented (`src/check_me/step1/`):
+  call_graph, data_control_flow, guards, trust_boundaries,
+  config_mode_command_triggers, callback_registrations,
+  evidence_anchors.
+- Regex baseline (`src/check_me/step1/regex_baseline.py`) +
+  `regex-compare` CLI subcommand for the architectural-decision
+  metric.
+- Pytest: 157/157 passing on synthetic primitives across 9 test
+  modules.
+- Datasets: 3 project-level CVE datasets (contiki-ng, libssh,
+  dnsmasq), each with `metadata.json`, vendored `source/` at
+  vulnerable_commit, 4-step gold (substrate / entrypoints /
+  evidence_irs / attack_scenarios), and `notes.md` audit logs.
+- Gold-row coverage on the 3 datasets after the round-2
+  label-honesty audit: 47/58 = 81% (see
+  `out/STAGE0_AUDIT_GENERALITY.md`).
+- All 4 Stage-0 exit criteria met (see §5 Stage 0 above).
+
+### Stage 1 — Step 2 + Step 3 (not yet started)
+
+To be planned and built. Inputs: Stage-0 substrate output and the
+Step-2 / Step-3 prompt designs described in §5.
+
+### Stage 2 — Step 4 (not yet started)
+
+### Stage 3 — Full pipeline evaluation (not yet started)

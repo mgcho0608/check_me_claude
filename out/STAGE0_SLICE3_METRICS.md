@@ -69,7 +69,7 @@ attacker bytes reach them through callback installation:
   6LoWPAN reassembly callback. It is reached via the radio driver's
   function table; no direct I/O call.
 
-**The bridge is Slice 5 (callback_registrations).** Once the
+**The bridge is Slice 4 (callback_registrations).** Once the
 substrate indexes function-pointer table installations and explicit
 `__attribute__((constructor))` / signal-handler / event-callback
 registrations, downstream Step 2 reasoning can recognize that
@@ -77,7 +77,7 @@ registrations, downstream Step 2 reasoning can recognize that
 making it a logical trust boundary even without a direct API call.
 This is the same architectural gap that makes libssh's
 `ssh_packet_process -> ssh_packet_userauth_success` indirect edge
-unresolved in the call_graph — both effects bridged by Slice 5.
+unresolved in the call_graph — both effects bridged by Slice 4.
 
 Per CLAUDE.md ("primitive correctness lives in pytest, not gold
 expansion"), Slice 3's correctness is verified by 23 primitive
@@ -107,7 +107,7 @@ on every API_TABLE entry.
 
 ## Stage 0 exit-criteria status (PLAN.md §5)
 
-1. ☐ Regex-baseline edge-count comparison — deferred to Slice 5.
+1. ☐ Regex-baseline edge-count comparison — deferred to Stage 0 closure (eventually closed by `out/STAGE0_REGEX_BASELINE_METRICS.md`).
 2. ☐ All 7 substrate categories — **4/7** in this slice. Three
    remaining: callback_registrations, config_mode_command_triggers,
    evidence_anchors.

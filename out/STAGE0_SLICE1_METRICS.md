@@ -15,7 +15,7 @@
 Both are by design — they require capability that lives in later slices, not Slice 1.
 
 ### libssh: `ssh_packet_process → ssh_packet_userauth_success` at `src/packet.c:463` (gold `kind=indirect`)
-The extractor reports the AST-truthful edge: `caller=ssh_packet_process, callee="cb->callbacks[type - cb->start]", kind=indirect`. The gold names the resolved target through libssh's `default_packet_handlers[]` static table at `src/packet.c:90`. **Resolving an indirect call site through a function-pointer table is the job of Slice 3 (callback_registrations)**; once that slice indexes static dispatch tables, this edge will be reported as `(ssh_packet_process, ssh_packet_userauth_success, indirect, via=default_packet_handlers[52])`.
+The extractor reports the AST-truthful edge: `caller=ssh_packet_process, callee="cb->callbacks[type - cb->start]", kind=indirect`. The gold names the resolved target through libssh's `default_packet_handlers[]` static table at `src/packet.c:90`. **Resolving an indirect call site through a function-pointer table is the job of Slice 4 (callback_registrations)**; once that slice indexes static dispatch tables, this edge will be reported as `(ssh_packet_process, ssh_packet_userauth_success, indirect, via=default_packet_handlers[52])`.
 
 ### contiki-ng: `tcpip_process → eventhandler` at `os/net/ipv6/tcpip.c:833` (gold `caller=tcpip_process`)
 The extractor reports `caller=process_thread_tcpip_process`. This is the actual symbol the `PROCESS_THREAD(tcpip_process, ev, data)` macro expands to. The gold uses the human-meaningful protothread name `tcpip_process` (documented in `notes.md` audit log A9 of that dataset). **Macro-expanded function naming is a known semantic gap** — Step 1 reports what the AST contains; downstream Step 2 reasoning will map `process_thread_<X>` back to `<X>` for protothreads. Auto-stripping the prefix in Slice 1 would be a contiki-ng-specific hack.
@@ -26,11 +26,13 @@ The extractor reports `caller=process_thread_tcpip_process`. This is the actual 
 
 ## What Slice 1 does NOT do (deferred to later slices)
 
+(As actually executed in the closed Stage 0; the original plan in Slice 1 had Slice 3 as callback_registrations and Slice 4 as trust_boundaries. The final ordering, reflected here, swaps those two so that Slice 3 closes more quickly.)
+
 - **Slice 2** — data/control flow extraction (def/use chains, conditional branches), guards (call + result-checking pairs).
-- **Slice 3** — callback registrations (function-pointer tables, signal handlers, constructors); resolves indirect calls through known tables.
-- **Slice 4** — trust boundaries (network sockets, IPC, file reads).
+- **Slice 3** — trust boundaries (network sockets, IPC, file reads).
+- **Slice 4** — callback registrations (function-pointer tables, signal handlers, constructors); the substrate row that downstream layers can join with the Slice 1 indirect call edges to resolve their targets.
 - **Slice 5** — config/mode/command triggers (`#ifdef`, CLI argument parsing, mode switches).
-- **Slice 6** — evidence anchors (line numbers, file paths, function signatures for non-call facts).
+- **Slice 6** — evidence anchors (top-level structural artefacts, magic-value macros).
 
 ## Reproducing
 
@@ -59,7 +61,9 @@ Pytest: `python3 -m pytest tests/`. 5/5 passing.
 
 Per PLAN.md §5 Stage 0:
 
-1. ☐ "Clang call graph extraction produces more edges than regex (on same input)." — **Not yet measured against a regex baseline**; deferred until Slice 3 so the comparison covers indirect calls (where AST has the largest advantage).
+1. ☐ Regex-baseline comparison — **deferred to Stage 0 closure**. Eventually closed by `out/STAGE0_REGEX_BASELINE_METRICS.md`, which also amends the criterion's wording (the headline is precision + indirect-edge coverage, not raw edge count).
 2. ☐ "All 7 substrate categories extracted and output as validated JSON." — 1/7 categories implemented (call_graph). Six remaining slices.
 3. ☑ "Output includes line numbers, file paths, function signatures for all facts." — file:line on every edge.
 4. ☑ "Extraction is fully deterministic (same input → same output, no LLM variance)." — pure libclang AST traversal, no randomness.
+
+> **Note:** This report is a Slice-1-time snapshot. For the post-audit gold-match numbers (47/58 = 81% across all 7 categories), see `out/STAGE0_AUDIT_GENERALITY.md`.

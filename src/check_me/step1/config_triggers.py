@@ -1,6 +1,6 @@
 """Config / mode / command-trigger extraction.
 
-Two mechanisms covered in this slice:
+Two mechanisms covered:
 
 - ``ifdef``: preprocessor conditional directives ``#if`` / ``#ifdef``
   / ``#ifndef`` / ``#elif``. Identifiers referenced in the condition
@@ -13,9 +13,10 @@ Two mechanisms covered in this slice:
   attributed to the file the flag was active for.
 
 ``cli_argument`` and ``mode_switch`` (CLI parsing idioms and switch
-statements over ``mode``-like variables) are out of scope for this
-slice; they require either runtime-CLI semantic recognition or
-heuristic naming, both of which sit better in a later slice.
+statements over ``mode``-like variables) are not implemented here;
+recognising arbitrary CLI parsing patterns or naming-based mode
+switches is heuristic-heavy and is left to future work outside the
+deterministic Step 1 surface.
 
 Output rows match ``schemas/substrate.v1.json``:
 

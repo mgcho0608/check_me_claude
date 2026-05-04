@@ -36,7 +36,9 @@ Step 4: 선들을 엮어 도형     — 공격 시나리오
 
 ## 현재 상태
 
-Stage 0 (결정론적 substrate 구축) **시작 전** — 첫 데이터셋 구축 중.
+**Stage 0 (결정론적 substrate 구축) 종료.** 7개 카테고리 추출기 + regex baseline 비교 모두 구현, 4/4 exit criteria 충족, 3개 project-level CVE 데이터셋 (contiki-ng, libssh, dnsmasq), pytest 157개 모두 통과. 자세한 상태는 [PLAN.md §Appendix A](./PLAN.md#appendix-a-current-pipeline-state) 참고.
+
+다음 단계는 **Stage 1**: Step 2 (LLM entrypoint mining + verification) + Step 3 (Evidence IR).
 
 ## 한 줄 결론
 

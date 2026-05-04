@@ -27,10 +27,11 @@ both ``recvmsg`` and ``sendmsg`` produces two rows: one
 
 Step 1's promise stays narrow: we record *syntactic* boundaries.
 Logical boundaries reached via callbacks, indirect dispatch, or
-project-internal abstraction (e.g. libssh's
-``ssh_packet_socket_callback`` is a callback installed by the
-socket layer; it does not itself call ``recvmsg``) are downstream
-Step 2 / Slice 5 reasoning.
+project-internal abstraction (a function installed under a
+network-callback slot but which never itself calls ``recvmsg``) are
+recovered downstream by joining this category's rows with the
+``callback_registrations`` substrate; the join is a deterministic
+substrate operation, not LLM reasoning.
 """
 
 from __future__ import annotations

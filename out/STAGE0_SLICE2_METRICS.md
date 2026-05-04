@@ -44,7 +44,7 @@ cannot reach without leaving Step 1's "what's in the AST" promise.
    at `src/packet.c:463` (libssh) — extractor reports the AST-truthful
    indirect edge `callee="cb->callbacks[type - cb->start]"`. Gold names
    the resolved target through the static `default_packet_handlers[]`
-   table at `src/packet.c:90`. **Fixed by Slice 5
+   table at `src/packet.c:90`. **Fixed by Slice 4
    (callback_registrations) once function-pointer tables are
    indexed.**
 2. **call_graph** `tcpip_process → eventhandler` at `tcpip.c:833`
@@ -106,7 +106,7 @@ validation.
 
 ## Stage 0 exit-criteria status (PLAN.md §5)
 
-1. ☐ Regex-baseline edge-count comparison — deferred to Slice 5.
+1. ☐ Regex-baseline edge-count comparison — deferred to Stage 0 closure (eventually closed by `out/STAGE0_REGEX_BASELINE_METRICS.md`).
 2. ☐ All 7 substrate categories — **3/7** in this slice (call_graph,
    data_control_flow, guards). Four remaining: trust_boundaries,
    config_mode_command_triggers, callback_registrations,

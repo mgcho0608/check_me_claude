@@ -8,9 +8,12 @@ version = "0.0.1"
 description = "Check Me — 4-step security analysis framework: deterministic substrate + LLM reasoning"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Apache-2.0"}
 dependencies = [
-  "clang==18.1.8",
+  # Pinned to clang 18 because the libclang ABI is not version-stable;
+  # the bundled bindings must match the libclang.so on the host. We
+  # accept any 18.x patch release. CHECK_ME_LIBCLANG env var overrides
+  # the host library path for non-default installs.
+  "clang>=18,<19",
   "jsonschema>=4.0",
 ]
 

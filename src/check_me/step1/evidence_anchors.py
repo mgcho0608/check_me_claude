@@ -5,23 +5,25 @@ the structural / numeric fact you would otherwise infer from running
 text"). They give downstream Step 2 / 3 layers a place to *cite* a
 piece of evidence without re-reading the whole TU.
 
-Mechanisms covered in this slice:
+Mechanisms covered:
 
 - ``magic_value``: ``#define NAME VALUE`` where VALUE is a numeric
   literal (decimal, hex, octal, binary). The macro's name is
   recorded in the note. Only top-level macro definitions in
   project-local files are emitted.
 - ``structural_artifact``: top-level ``struct`` / ``union`` /
-  ``enum`` / ``typedef`` declarations. Each gets a single row
-  pointing at the declaration line. Enums also emit one row per
-  named member.
+  ``enum`` / ``typedef`` declarations, top-level ``VarDecl``
+  globals, alias macros (non-numeric ``#define`` bodies). Each
+  gets a row at its declaration line; enums and structs/unions
+  also emit one row per named member / field.
 
 The remaining schema enums ``hardcoded_value`` and
-``key_reference`` are deliberately not produced in this slice — they
-require name-pattern heuristics (``*_KEY``, ``*_TOKEN``, embedded
-URLs / paths) that overlap heavily with security-keyword scanning,
-which is downstream Step 2 reasoning. The ``unknown`` enum value is
-available for the rare case but not used here.
+``key_reference`` are deliberately not produced — they require
+name-pattern heuristics (``*_KEY``, ``*_TOKEN``, embedded URLs /
+paths) that overlap heavily with security-keyword scanning, which
+is downstream Step 2 reasoning. The ``unknown`` enum value remains
+available for any future case that does not fit the four kinds
+above.
 
 Output rows match ``schemas/substrate.v1.json``:
 

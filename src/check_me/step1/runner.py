@@ -1,11 +1,28 @@
 """Step 1 substrate runner.
 
-Coordinates AST loading and per-category extraction. For Slice 1 the
-only category implemented is ``call_graph``; the other six categories
-are emitted as empty lists so the output already validates against
-``schemas/substrate.v1.json``.
+Coordinates AST loading and dispatches each parsed translation
+unit to the seven per-category extractors. Output is a single
+JSON document validated against ``schemas/substrate.v1.json``.
 
-Future slices wire in the remaining extractors here.
+Categories (all implemented):
+
+- ``call_graph`` — direct + indirect ``CallExpr`` edges
+  (``call_graph.py``).
+- ``data_control_flow`` — branch / loop / def_use entries
+  (``data_control_flow.py``).
+- ``guards`` — if-with-terminating-then constructs
+  (``guards.py``).
+- ``trust_boundaries`` — functions that directly invoke a known
+  POSIX / libc external-I/O API (``trust_boundaries.py``).
+- ``callback_registrations`` — function tables, function-pointer
+  assignments, signal handlers, constructor attributes
+  (``callback_registrations.py``).
+- ``config_mode_command_triggers`` — ``#ifdef``-family directives
+  and ``-D`` build flags (``config_triggers.py``).
+- ``evidence_anchors`` — magic-value macros and structural
+  artefacts (struct / union / enum / typedef definitions, named
+  fields, top-level VarDecls, alias macros)
+  (``evidence_anchors.py``).
 """
 
 from __future__ import annotations

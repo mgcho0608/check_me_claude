@@ -70,7 +70,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["kind", "function", "file"],
+            "required": ["kind", "function", "file", "direction"],
             "properties": {
               "kind": {"enum": ["network_socket", "ipc_endpoint", "file_read", "external_io", "unknown"]},
               "function": {"type": "string"},
@@ -99,7 +99,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["registration_site", "callback_function", "file"],
+            "required": ["registration_site", "callback_function", "file", "kind"],
             "properties": {
               "registration_site": {"type": "string"},
               "callback_function": {"type": "string"},

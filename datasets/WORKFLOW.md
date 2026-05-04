@@ -71,16 +71,36 @@ build_commands는 compile_commands.json 생성까지 포함해야 한다 (Step 1
 - `sink` (≥ 1, file:line 포함)
 - `impact`, `verdict.exploitability`, `confidence`
 
-### 6. Agent self-check (필수)
-라벨 작성 후 반드시 수행하고 `notes.md` 에 결과 기록:
+### 6. Agent self-check (필수) — 두 단계 hand pass
 
-- [ ] 모든 file:line 참조가 `source/` 안에서 resolve되는가?
-- [ ] 모든 claim이 patch diff / authoritative source / cloned code excerpt 중 하나로 backing되는가?
+라벨 작성 후 두 layer로 직접 (script 신뢰 금지) 수행하고 `notes.md` 에 결과 기록.
+
+#### 6.1 Pass 1 — file:line + 의미 일치
+
+- [ ] 모든 file:line 참조가 `source/` 안에서 resolve되며, 인용한 line text + enclosing function 둘 다 직접 본 코드와 일치하는가?
+- [ ] 모든 claim이 patch diff / authoritative source / cloned code excerpt 중 하나로 backing되고, 그 backing이 실제로 해당 claim을 뒷받침하는지 한 번 더 읽어 확인했는가?
 - [ ] enum 값이 `schemas/` 의 현재 schema_version과 일치하는가?
-- [ ] 모든 AttackScenario에 exploit_chain + sink ≥ 1 가 있는가?
+- [ ] 모든 AttackScenario에 exploit_chain + sink ≥ 1 이 있는가?
 - [ ] 모든 EvidenceIR에 entry point가 있는가?
 - [ ] Step 2 entrypoint에 supporting substrate edges 또는 quarantine 사유가 있는가?
-- [ ] `unknown` enum이 사용된 경우 free-text note가 동반되는가?
+- [ ] Step 1 substrate에 absence(없는 것)를 facts로 넣지 않았는가? (absence 의미는 IR `conditions.blocking` 또는 `guards_missing`에 둠)
+
+#### 6.2 Pass 2 — Label-honesty (PLAN §4.6 #10)
+
+라벨이 단지 "extractor와 매칭 잘 되게" 보이는 enum으로 force-fit되어 있지 않은지 별도 hand pass로 점검. 점수 inflate가 잘못된 라벨보다 더 나쁘다. corpus가 자라며 추가되는 stretch 패턴들:
+
+- [ ] `kind: "function_table"` 은 **static array of function names** 만. main-loop 직접 호출이나 protothread/event-dispatch 매크로는 **function table 아님** → `unknown` + free-text.
+- [ ] `kind: "compile_flag"` 은 **`-D<NAME>` 빌드 플래그** 만 (line: 0 관습). `#if` 블록 안 일반 C 라인은 `compile_flag` 행이 아님 → directive 라인을 `kind: "ifdef"` 로.
+- [ ] `kind: "cli_argument"` 은 **CLI 파서 사이트** (예: `getopt` switch case) 만. CLI-gated 동작이 *발현되는* 라인은 cli_argument 행 아님 → `unknown` + free-text.
+- [ ] `kind: "structural_artifact"` (evidence_anchors) 은 **top-level 구조적 사실** 만 (struct / typedef / enum / global / alias 매크로). 함수 본문 안 statement 라인은 `data_control_flow` 가 다룸 — evidence_anchors에 중복 기재 금지.
+- [ ] `sink_type: "memory_read" | "memory_write"` 은 **그 라인이 정확히 그 동작을 수행할 때** 만. 라인이 *상태를 corrupt*시키고 실제 harmful read/write가 downstream에서 일어난다면 `sink_type: "state_corruption"` 으로 + `impact.description` 에 corruption→consequence 체인 명시.
+- [ ] `trigger_type: "callback"` (entrypoints) 은 **callback 등록 메커니즘으로 설치된 함수** 만 (function-pointer assignment / function table / signal handler / constructor attribute). 일반 내부 호출은 callback trigger 아님 — entrypoint로 *유지*하고 싶다면 `trigger_type: "unknown"` + free-text.
+- [ ] 모든 `unknown` enum 값에 free-text note가 동반되는가?
+
+#### 6.3 notes.md 기록 규칙
+
+- 두 pass 결과를 별도 audit log 섹션으로 기록 (예: "Audit log — round 1 (file:line + function)" 와 "Audit log — round 2 (label-honesty)"). 어떤 항목을 어떻게 잡고 어떻게 고쳤는지 한 줄씩 적는다.
+- self-check 통과 / 미통과를 솔직히 기록. 통과 안 한 항목을 "OK"로 적지 않는다.
 
 ### 7. notes.md 기록
 - 라벨링 과정에서 어려웠던 결정

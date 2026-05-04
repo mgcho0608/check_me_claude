@@ -1,25 +1,36 @@
 """Command-line entry point.
 
-Examples
---------
-Run Step 1 over the contiki-ng dataset and write the substrate JSON to
-``out/contiki-ng-CVE-2021-21281/substrate.json``::
+Two subcommands:
+
+- ``step1`` — run the deterministic substrate extractor over a
+  project source tree and write a substrate JSON document.
+- ``regex-compare`` — run both the Clang AST call_graph extractor
+  and the naive regex baseline on the same tree and print a
+  comparison report (Stage 0 exit criterion 1).
+
+Both subcommands take ``--src`` (project root), ``--project``,
+``--cve``, and a repeatable ``--extra-arg`` flag for clang
+arguments injected when no ``compile_commands.json`` is
+available.
+
+Example::
 
     python -m check_me step1 \\
-      --src datasets/contiki-ng-CVE-2021-21281/source \\
-      --project contiki-ng \\
-      --cve CVE-2021-21281 \\
-      --out out/contiki-ng-CVE-2021-21281/substrate.json
+      --src datasets/<project>-<cve>/source \\
+      --project <project> --cve <CVE-id> \\
+      --out out/<project>-<cve>/substrate.json
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
-from .step1 import runner as step1_runner
+from .step1 import call_graph as cg_mod
 from .step1 import regex_baseline as regex_mod
+from .step1 import runner as step1_runner
 
 
 def _step1(args: argparse.Namespace) -> int:
@@ -57,8 +68,12 @@ def _regex_compare(args: argparse.Namespace) -> int:
     """Run the Clang AST call_graph extractor and the regex baseline
     on the same project, then print a comparison report.
 
-    Closes PLAN.md §5 Stage 0 exit criterion 1: "Clang call graph
-    extraction produces more edges than regex (on same input)."
+    Closes PLAN.md §5 Stage 0 exit criterion 1, which (per the
+    measurement in ``out/STAGE0_REGEX_BASELINE_METRICS.md``) is
+    phrased "Clang call graph emits an indirect-edge class regex
+    cannot represent, and is free of preprocessor-disabled-code
+    false positives" — the architectural advantage is precision +
+    indirect-edge coverage, not raw edge count.
     """
     src = Path(args.src)
     if not src.is_dir():
@@ -72,7 +87,6 @@ def _regex_compare(args: argparse.Namespace) -> int:
         cve=args.cve,
         extra_args=tuple(args.extra_arg),
     )
-    from .step1 import call_graph as cg_mod
     clang_edges = [
         cg_mod.CallEdge(
             caller=r["caller"],
@@ -94,7 +108,6 @@ def _regex_compare(args: argparse.Namespace) -> int:
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
         # Persist machine-readable comparison JSON.
-        import json
         out.write_text(
             json.dumps(
                 {

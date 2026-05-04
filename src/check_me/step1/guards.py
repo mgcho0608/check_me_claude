@@ -6,7 +6,7 @@ branch terminates the current execution path — by ``return``, by
 ``continue`` out of an enclosing loop. Such a construct gates the
 fall-through code against the predicate.
 
-Detected forms (vulnerable_commit-style C — extend later as needed):
+Detected forms (extend later as needed):
 
 1. ``if (cond) return ...;``
 2. ``if (cond) goto label;``
