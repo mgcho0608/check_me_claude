@@ -45,7 +45,8 @@ def _step1(args: argparse.Namespace) -> int:
         f"{report.guards_total} guards, "
         f"{report.trust_total} trust boundaries, "
         f"{report.callbacks_total} callbacks, "
-        f"{report.config_total} config triggers "
+        f"{report.config_total} config triggers, "
+        f"{report.anchors_total} anchors "
         f"in {report.elapsed_sec:.1f}s -> {out}"
     )
     return 0

@@ -22,6 +22,7 @@ from . import (
     callback_registrations,
     config_triggers,
     data_control_flow,
+    evidence_anchors,
     guards,
     trust_boundaries,
 )
@@ -44,6 +45,7 @@ class RunReport:
     trust_total: int
     callbacks_total: int
     config_total: int
+    anchors_total: int
 
 
 SCHEMA_VERSION = "v1"
@@ -74,6 +76,7 @@ def run(
     all_guards: list[guards.GuardEntry] = []
     all_tb: list[trust_boundaries.TrustBoundary] = []
     all_cb: list[callback_registrations.CallbackReg] = []
+    all_anchors: list[evidence_anchors.Anchor] = []
     parse_errors = 0
     for spec in specs:
         parsed = ast_index.parse_file(index, spec)
@@ -97,6 +100,9 @@ def run(
                 parsed, project_root
             )
         )
+        all_anchors.extend(
+            evidence_anchors.extract_anchors_from_tu(parsed, project_root)
+        )
 
     edges = call_graph.merge_edges(all_edges)
     dcf = data_control_flow.merge_dcf(all_dcf)
@@ -106,6 +112,7 @@ def run(
     cfg_rows = config_triggers.merge_config_triggers(
         config_triggers.extract_config_triggers(project_root, specs)
     )
+    anchor_rows = evidence_anchors.merge_anchors(all_anchors)
     elapsed = time.monotonic() - started
 
     substrate: dict[str, Any] = {
@@ -121,7 +128,7 @@ def run(
                 e.to_json() for e in cfg_rows
             ],
             "callback_registrations": [e.to_json() for e in cb_rows],
-            "evidence_anchors": [],
+            "evidence_anchors": [e.to_json() for e in anchor_rows],
         },
     }
     report = RunReport(
@@ -140,6 +147,7 @@ def run(
         trust_total=len(tb_rows),
         callbacks_total=len(cb_rows),
         config_total=len(cfg_rows),
+        anchors_total=len(anchor_rows),
     )
     return substrate, report
 
