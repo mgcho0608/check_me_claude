@@ -12,16 +12,18 @@ from .prompts import MINER_OUTPUT_SCHEMA, build_miner_messages
 from .substrate_slice import SubstrateSlice
 
 
-# Floor for the miner's first-attempt max_tokens budget. The shared
-# CHECK_ME_LLM_MAX_TOKENS default (4096) is too tight for the miner
-# on real projects: a 14-candidate response with reachability /
-# attacker_controllability prose runs ~9-10K tokens of visible JSON
-# alone, and Gemini 2.5/3 thinking tokens count against the same
-# ceiling. Without a floor, the first attempt always returns
-# finish_reason=length and burns one retry. 8192 lets the typical
-# response complete on the first try while still respecting any
-# higher value the operator set via env (we only raise, never lower).
-MIN_MINER_MAX_TOKENS = 8192
+# Floor for the miner's first-attempt max_tokens budget. The miner is
+# instructed to take the recall side of the proposer/verifier split,
+# so a typical response carries 20-40 candidates each with
+# reachability / attacker_controllability prose (~400 chars ≈ 100
+# tokens of visible JSON per candidate). For very large projects
+# (an OS-stack codebase with 200+ candidate functions in the slice)
+# the prompt asks for 60-80 candidates — that's ~25K visible tokens
+# alone, plus reasoning headroom on thinking models. 32768 is the
+# safe first-attempt floor that lets the miner emit the full
+# recall set without self-truncating. Operator env values higher
+# than the floor are respected; lower values are bumped up.
+MIN_MINER_MAX_TOKENS = 32768
 
 
 def mine(

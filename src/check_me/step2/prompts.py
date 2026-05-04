@@ -89,13 +89,28 @@ Hard constraints:
   by external bytes); it is not project-specific.
 - A function on the egress / output side (e.g. send-only API wrappers)
   is NOT an entrypoint — skip it.
-- Be selective. Real-world projects have many trust_boundaries and
-  callback_registrations rows (50-100 is typical); MOST are not
-  security-relevant entrypoints — they may be CLI utilities, internal
-  wrappers, or duplicate functionality. Aim for the 5-25 most
-  plausible runtime entrypoints. If two rows differ only structurally
-  (same function reached two ways), produce ONE candidate that
+
+Recall mindset (proposer / verifier division of labour):
+
+- Your job is RECALL. A separate verifier LLM will independently
+  critique each candidate against the substrate and quarantine the
+  ones that don't survive scrutiny — a false positive at your
+  layer is recoverable (it lands in the quarantined bucket).
+  A false negative at your layer is NOT recoverable: the verifier
+  never sees candidates you didn't propose.
+- Concretely: propose ANY function that is plausibly a runtime
+  entrypoint given the substrate evidence — every callback target,
+  every distinct trust-boundary function, every plausible
+  indexed-dispatch function. Do not filter for "the most important
+  N"; lean inclusive. If two rows differ only structurally (same
+  function reached two ways), still produce ONE candidate that
   acknowledges both routes in supporting_substrate_edges.
+- Numerical guidance: a typical project's slice surfaces 20-40
+  plausible candidates; very large projects (e.g. an OS-stack
+  codebase with hundreds of callback_registrations rows) can
+  warrant 60-80. Empty list is permitted only when the slice
+  genuinely contains no plausible entrypoint. Do not artificially
+  cap to a small number.
 """
 
 _MINER_OUTPUT_SHAPE = """\
