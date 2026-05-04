@@ -38,7 +38,11 @@ def _step1(args: argparse.Namespace) -> int:
         f"step1: {report.files_parsed} files, "
         f"{report.parse_errors} parse errors, "
         f"{report.edges_total} call edges "
-        f"(direct={report.edges_direct} indirect={report.edges_indirect}) "
+        f"(direct={report.edges_direct} indirect={report.edges_indirect}), "
+        f"{report.dcf_total} dcf entries "
+        f"(branch={report.dcf_branch} loop={report.dcf_loop} "
+        f"def_use={report.dcf_def_use}), "
+        f"{report.guards_total} guards "
         f"in {report.elapsed_sec:.1f}s -> {out}"
     )
     return 0

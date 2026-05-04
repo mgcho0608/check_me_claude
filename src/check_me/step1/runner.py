@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import ast_index, call_graph
+from . import ast_index, call_graph, data_control_flow, guards
 
 
 @dataclass
@@ -28,6 +28,11 @@ class RunReport:
     edges_total: int
     edges_direct: int
     edges_indirect: int
+    dcf_total: int
+    dcf_branch: int
+    dcf_loop: int
+    dcf_def_use: int
+    guards_total: int
 
 
 SCHEMA_VERSION = "v1"
@@ -54,6 +59,8 @@ def run(
     specs = ast_index.build_file_specs(project_root, extra_args=extra_args)
 
     all_edges: list[call_graph.CallEdge] = []
+    all_dcf: list[data_control_flow.DCFEntry] = []
+    all_guards: list[guards.GuardEntry] = []
     parse_errors = 0
     for spec in specs:
         parsed = ast_index.parse_file(index, spec)
@@ -61,8 +68,16 @@ def run(
         all_edges.extend(
             call_graph.extract_call_edges_from_tu(parsed, project_root)
         )
+        all_dcf.extend(
+            data_control_flow.extract_dcf_from_tu(parsed, project_root)
+        )
+        all_guards.extend(
+            guards.extract_guards_from_tu(parsed, project_root)
+        )
 
     edges = call_graph.merge_edges(all_edges)
+    dcf = data_control_flow.merge_dcf(all_dcf)
+    guard_rows = guards.merge_guards(all_guards)
     elapsed = time.monotonic() - started
 
     substrate: dict[str, Any] = {
@@ -71,8 +86,8 @@ def run(
         "cve": cve,
         "categories": {
             "call_graph": [e.to_json() for e in edges],
-            "data_control_flow": [],
-            "guards": [],
+            "data_control_flow": [e.to_json() for e in dcf],
+            "guards": [e.to_json() for e in guard_rows],
             "trust_boundaries": [],
             "config_mode_command_triggers": [],
             "callback_registrations": [],
@@ -87,6 +102,11 @@ def run(
         edges_total=len(edges),
         edges_direct=sum(1 for e in edges if e.kind == "direct"),
         edges_indirect=sum(1 for e in edges if e.kind == "indirect"),
+        dcf_total=len(dcf),
+        dcf_branch=sum(1 for d in dcf if d.kind == "branch"),
+        dcf_loop=sum(1 for d in dcf if d.kind == "loop"),
+        dcf_def_use=sum(1 for d in dcf if d.kind == "def_use"),
+        guards_total=len(guard_rows),
     )
     return substrate, report
 

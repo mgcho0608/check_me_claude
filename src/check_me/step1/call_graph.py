@@ -40,6 +40,11 @@ from typing import Iterable
 
 import clang.cindex as cx
 
+from .ast_helpers import (
+    function_name as _function_name,
+    in_project_location,
+    written_form as _written_form_helper,
+)
 from .ast_index import ParseResult
 
 
@@ -65,26 +70,6 @@ class CallEdge:
         return d
 
 
-def _function_name(decl: cx.Cursor) -> str:
-    return decl.spelling or decl.displayname or "<anonymous>"
-
-
-def _written_form(cursor: cx.Cursor) -> str:
-    """Best-effort textual form of a CallExpr's callee.
-
-    Used for indirect calls when no FunctionDecl is referenced.
-    """
-    extent = cursor.extent
-    try:
-        with open(extent.start.file.name) as fh:
-            lines = fh.readlines()
-    except (OSError, AttributeError):
-        return "<unknown>"
-    s, e = extent.start, extent.end
-    if s.line == e.line:
-        return lines[s.line - 1][s.column - 1 : e.column - 1].strip()
-    # Multi-line: just take the first line.
-    return lines[s.line - 1][s.column - 1 :].rstrip()
 
 
 def _resolve_callee(call: cx.Cursor) -> tuple[str, str]:
@@ -106,7 +91,7 @@ def _resolve_callee(call: cx.Cursor) -> tuple[str, str]:
     if ref is not None and ref.kind == cx.CursorKind.FUNCTION_DECL:
         return (ref.spelling, "direct")
     # Otherwise treat as indirect; record the written form.
-    return (_written_form(callee_expr) or "<indirect>", "indirect")
+    return (_written_form_helper(callee_expr) or "<indirect>", "indirect")
 
 
 def _walk_calls_in(
