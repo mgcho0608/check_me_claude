@@ -20,10 +20,12 @@ not on dataset names or known symbol patterns.
 
 from .substrate_slice import (
     SubstrateSlice,
+    slice_for_candidate,
     slice_substrate,
 )
 
 __all__ = [
     "SubstrateSlice",
+    "slice_for_candidate",
     "slice_substrate",
 ]

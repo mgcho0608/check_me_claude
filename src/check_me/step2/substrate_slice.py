@@ -126,7 +126,7 @@ def slice_substrate(
 
     trust_rows: list[dict[str, Any]] = list(cats.get("trust_boundaries", []))
     callback_rows: list[dict[str, Any]] = list(cats.get("callback_registrations", []))
-    config_rows: list[dict[str, Any]] = list(cats.get("config_mode_command_triggers", []))
+    all_config: list[dict[str, Any]] = list(cats.get("config_mode_command_triggers", []))
 
     # 1. The core candidate set: every function named in
     #    trust_boundaries (the function field) and every callback_function
@@ -169,14 +169,25 @@ def slice_substrate(
     if len(relevant_guards) > max_guards:
         relevant_guards = relevant_guards[:max_guards]
 
-    # 5. Evidence anchors in files mentioned by trust boundaries or
-    #    callback registrations (lightweight context; we don't try to
-    #    pull every anchor in the project).
+    # 5. Files containing candidate-relevant rows. config_triggers
+    #    and evidence_anchors are filtered by file so the slice
+    #    covers candidate context without dumping the whole project.
     relevant_files: set[str] = set()
     for r in trust_rows + callback_rows + neighbor_edges + relevant_guards:
         f = r.get("file")
         if isinstance(f, str):
             relevant_files.add(f)
+
+    # 6. config_mode_command_triggers in files containing
+    #    candidate-relevant rows (project-wide enumeration would
+    #    swamp the slice on large CMake projects).
+    config_rows = [
+        c for c in all_config if c.get("file") in relevant_files
+    ]
+    config_rows.sort(key=lambda c: (c.get("file", ""), c.get("line") or 0,
+                                       c.get("name", "")))
+
+    # 7. Evidence anchors in those same files.
     all_anchors: list[dict[str, Any]] = list(cats.get("evidence_anchors", []))
     relevant_anchors = [
         a for a in all_anchors if a.get("file") in relevant_files
@@ -210,3 +221,88 @@ def _load(substrate: dict | str | Path) -> dict[str, Any]:
     if isinstance(substrate, Path):
         return json.loads(substrate.read_text())
     return json.loads(substrate)
+
+
+# --------------------------------------------------------------------------- #
+# Per-candidate focusing
+# --------------------------------------------------------------------------- #
+
+
+def slice_for_candidate(
+    full: SubstrateSlice,
+    *,
+    candidate_function: str,
+    candidate_file: str | None = None,
+) -> SubstrateSlice:
+    """Return a candidate-focused projection of ``full`` for the
+    verifier.
+
+    Per PLAN §0 / Rule 2b, the verifier critiques ONE candidate at
+    a time. Sending the full project slice on every verifier call is
+    wasteful — the verifier's questions ("is this reachable? is the
+    attacker in control?") only need substrate evidence about the
+    specific candidate, not the whole project.
+
+    The focused slice keeps:
+
+    - the trust_boundaries row(s) for ``candidate_function`` and (as
+      project-wide context) other trust_boundaries in the same file,
+    - all callback_registrations whose ``callback_function`` is the
+      candidate (these directly refute or support callback-style
+      reachability),
+    - call_graph edges where caller == candidate or callee ==
+      candidate (one-hop in/out),
+    - guards in ``candidate_function`` only,
+    - evidence_anchors and config_mode_command_triggers in
+      ``candidate_file`` only (small, cheap per-file context).
+
+    The selection rule is project-agnostic — it walks substrate
+    fields the schema defines, never special-cases a project name
+    or symbol pattern.
+    """
+    if candidate_file is None:
+        # Best-effort lookup from the full slice.
+        for r in (
+            *full.trust_boundaries,
+            *full.callback_registrations,
+        ):
+            if r.get("function") == candidate_function or r.get("callback_function") == candidate_function:
+                f = r.get("file")
+                if isinstance(f, str):
+                    candidate_file = f
+                    break
+
+    same_file = (lambda f: f == candidate_file) if candidate_file else (lambda f: False)
+
+    trust = [
+        r for r in full.trust_boundaries
+        if r.get("function") == candidate_function or same_file(r.get("file"))
+    ]
+    callbacks = [
+        r for r in full.callback_registrations
+        if r.get("callback_function") == candidate_function
+        or r.get("function") == candidate_function
+        or same_file(r.get("file"))
+    ]
+    edges = [
+        e for e in full.call_graph
+        if e.get("caller") == candidate_function or e.get("callee") == candidate_function
+    ]
+    guards = [
+        g for g in full.guards
+        if g.get("function") == candidate_function
+    ]
+    anchors = [a for a in full.evidence_anchors if same_file(a.get("file"))]
+    cfg = [t for t in full.config_mode_command_triggers if same_file(t.get("file"))]
+
+    return SubstrateSlice(
+        project=full.project,
+        cve=full.cve,
+        candidate_functions=[candidate_function],
+        trust_boundaries=trust,
+        callback_registrations=callbacks,
+        config_mode_command_triggers=cfg,
+        call_graph=edges,
+        guards=guards,
+        evidence_anchors=anchors,
+    )

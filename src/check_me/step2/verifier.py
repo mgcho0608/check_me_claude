@@ -28,13 +28,24 @@ def verify_one(
     candidate: dict[str, Any],
     *,
     max_retries: int = 2,
+    max_tokens_ceiling: int = 16384,
+    reasoning_effort: str | None = "low",
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:
     """Verify a single candidate. ``candidate`` is the miner's full
     candidate dict; this function strips the miner-only keys before
-    handing it to the verifier prompt builder."""
+    handing it to the verifier prompt builder.
+
+    ``reasoning_effort`` is set to ``"low"`` for the same reason as
+    in the miner — the verifier critiques against a focused
+    per-candidate slice and an unbounded thinking budget tends to
+    crowd out the visible JSON.
+    """
     structural = candidate_for_verifier(candidate)
     system, user = build_verifier_messages(slice_, structural)
+    extra: dict[str, Any] = {}
+    if reasoning_effort is not None:
+        extra["reasoning_effort"] = reasoning_effort
     return chat_json(
         client=client,
         config=config,
@@ -42,5 +53,7 @@ def verify_one(
         user=user,
         schema=VERIFIER_OUTPUT_SCHEMA,
         max_retries=max_retries,
+        max_tokens_ceiling=max_tokens_ceiling,
+        extra_request=extra or None,
         chat_fn=chat_fn,
     )

@@ -77,6 +77,13 @@ Hard constraints:
   under any trigger) is NOT an entrypoint — skip it.
 - A function on the egress / output side (e.g. send-only API wrappers)
   is NOT an entrypoint — skip it.
+- Be selective. Real-world projects have many trust_boundaries and
+  callback_registrations rows (50-100 is typical); MOST are not
+  security-relevant entrypoints — they may be CLI utilities, internal
+  wrappers, or duplicate functionality. Aim for the 5-25 most
+  plausible runtime entrypoints. If two rows differ only structurally
+  (same function reached two ways), produce ONE candidate that
+  acknowledges both routes in supporting_substrate_edges.
 """
 
 _MINER_OUTPUT_SHAPE = """\

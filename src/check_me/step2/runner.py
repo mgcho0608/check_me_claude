@@ -23,7 +23,11 @@ from ..llm.client import ChatRequest, ChatResponse, chat, make_client
 from ..llm.config import Config, StepKind, load_config
 from . import miner as miner_mod
 from . import verifier as verifier_mod
-from .substrate_slice import SubstrateSlice, slice_substrate
+from .substrate_slice import (
+    SubstrateSlice,
+    slice_for_candidate,
+    slice_substrate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +113,22 @@ def run(
     kept = 0
     quarantined = 0
     for cand in proposed:
+        # Per PLAN §0 / Rule 2b the verifier critiques ONE candidate
+        # at a time. Sending the full project slice on every call
+        # would burn ~N × full_slice tokens; instead we hand it a
+        # focused per-candidate sub-slice (trust boundaries +
+        # callback registrations + 1-hop call graph involving the
+        # candidate + guards in the candidate function + per-file
+        # anchors / config triggers).
+        focused = slice_for_candidate(
+            slice_,
+            candidate_function=cand.get("function", ""),
+            candidate_file=cand.get("file"),
+        )
         v_result = verifier_mod.verify_one(
             client=verifier_client,
             config=verifier_config,
-            slice_=slice_,
+            slice_=focused,
             candidate=cand,
             chat_fn=chat_fn,
         )

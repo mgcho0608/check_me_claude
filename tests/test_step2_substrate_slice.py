@@ -114,17 +114,28 @@ def test_evidence_anchors_filtered_by_file():
     assert files == {"f.c"}
 
 
-def test_config_triggers_passed_through_unfiltered():
-    """All config_mode_command_triggers are preserved — they apply
-    project-wide and the LLM needs them to reason about which
-    candidates are gated by which flags."""
+def test_config_triggers_filtered_to_candidate_relevant_files():
+    """``config_mode_command_triggers`` is filtered to files that
+    contain candidate-relevant rows. A project-wide enumeration would
+    swamp the slice on large CMake projects (libssh's full project
+    enum is ~645 rows; only ~250 land in candidate files). Triggers
+    in unrelated files are dropped."""
     sub = _empty_substrate()
+    # One candidate function whose row pins file=f.c.
+    sub["categories"]["trust_boundaries"].append({
+        "kind": "network_socket", "function": "entry",
+        "file": "f.c", "line": 1, "direction": "untrusted_to_trusted",
+    })
     sub["categories"]["config_mode_command_triggers"] = [
-        {"kind": "ifdef", "name": "WITH_X", "file": "x.c", "line": 5},
-        {"kind": "compile_flag", "name": "BUILD_MODE", "file": "y.c", "line": 0},
+        # In the candidate file — kept.
+        {"kind": "ifdef", "name": "WITH_X", "file": "f.c", "line": 5},
+        # In an unrelated file — dropped.
+        {"kind": "compile_flag", "name": "BUILD_MODE",
+         "file": "unrelated.c", "line": 0},
     ]
     s = slice_substrate(sub)
-    assert len(s.config_mode_command_triggers) == 2
+    assert len(s.config_mode_command_triggers) == 1
+    assert s.config_mode_command_triggers[0]["file"] == "f.c"
 
 
 def test_call_edge_cap_applied_after_relevance_filter():
@@ -188,6 +199,113 @@ def test_load_from_json_string_and_path(tmp_path):
     s_path = slice_substrate(p)
     s_dict = slice_substrate(sub)
     assert s_str.project == s_path.project == s_dict.project == "p1"
+
+
+def _full_slice_for_focusing_tests():
+    """A non-trivial full slice with two candidate functions in
+    different files — used to verify the per-candidate focus
+    correctly narrows the substrate."""
+    sub = _empty_substrate()
+    sub["categories"]["trust_boundaries"] = [
+        {"kind": "network_socket", "function": "alpha",
+         "file": "a.c", "line": 1, "direction": "untrusted_to_trusted"},
+        {"kind": "network_socket", "function": "beta",
+         "file": "b.c", "line": 2, "direction": "untrusted_to_trusted"},
+        {"kind": "file_read", "function": "alpha_helper",
+         "file": "a.c", "line": 50, "direction": "untrusted_to_trusted"},
+    ]
+    sub["categories"]["callback_registrations"] = [
+        {"registration_site": "T[]", "callback_function": "alpha",
+         "file": "a.c", "line": 5, "kind": "function_table"},
+        {"registration_site": "U[]", "callback_function": "beta",
+         "file": "b.c", "line": 10, "kind": "function_table"},
+    ]
+    sub["categories"]["call_graph"] = [
+        {"caller": "alpha", "callee": "alpha_helper", "file": "a.c", "line": 7, "kind": "direct"},
+        {"caller": "beta", "callee": "other", "file": "b.c", "line": 3, "kind": "direct"},
+        {"caller": "z", "callee": "alpha", "file": "z.c", "line": 1, "kind": "direct"},
+    ]
+    sub["categories"]["guards"] = [
+        {"function": "alpha", "file": "a.c", "guard_call": "x>0",
+         "guard_line": 4, "result_used": True},
+        {"function": "beta", "file": "b.c", "guard_call": "y!=0",
+         "guard_line": 6, "result_used": True},
+    ]
+    sub["categories"]["evidence_anchors"] = [
+        {"file": "a.c", "line": 100, "kind": "magic_value"},
+        {"file": "b.c", "line": 200, "kind": "magic_value"},
+    ]
+    sub["categories"]["config_mode_command_triggers"] = [
+        {"kind": "ifdef", "name": "WITH_A", "file": "a.c", "line": 1},
+        {"kind": "ifdef", "name": "WITH_B", "file": "b.c", "line": 1},
+    ]
+    return slice_substrate(sub)
+
+
+def test_slice_for_candidate_narrows_to_function_only_guards():
+    from check_me.step2.substrate_slice import slice_for_candidate
+    full = _full_slice_for_focusing_tests()
+    focused = slice_for_candidate(full, candidate_function="alpha", candidate_file="a.c")
+    # Only guards in alpha — beta's guards must drop.
+    assert {g["function"] for g in focused.guards} == {"alpha"}
+
+
+def test_slice_for_candidate_one_hop_call_graph_only():
+    from check_me.step2.substrate_slice import slice_for_candidate
+    full = _full_slice_for_focusing_tests()
+    focused = slice_for_candidate(full, candidate_function="alpha", candidate_file="a.c")
+    pairs = sorted({(e["caller"], e["callee"]) for e in focused.call_graph})
+    # alpha->helper (alpha as caller) and z->alpha (alpha as callee).
+    # beta->other must drop.
+    assert ("alpha", "alpha_helper") in pairs
+    assert ("z", "alpha") in pairs
+    assert ("beta", "other") not in pairs
+
+
+def test_slice_for_candidate_callback_registrations_match_function():
+    from check_me.step2.substrate_slice import slice_for_candidate
+    full = _full_slice_for_focusing_tests()
+    focused = slice_for_candidate(full, candidate_function="alpha", candidate_file="a.c")
+    cb_funcs = {r["callback_function"] for r in focused.callback_registrations}
+    assert "alpha" in cb_funcs
+    # beta's callback should drop because beta is in b.c, not a.c.
+    assert "beta" not in cb_funcs
+
+
+def test_slice_for_candidate_anchors_filtered_by_file():
+    from check_me.step2.substrate_slice import slice_for_candidate
+    full = _full_slice_for_focusing_tests()
+    focused = slice_for_candidate(full, candidate_function="alpha", candidate_file="a.c")
+    files = {a["file"] for a in focused.evidence_anchors}
+    assert files == {"a.c"}
+
+
+def test_slice_for_candidate_config_triggers_filtered_by_file():
+    from check_me.step2.substrate_slice import slice_for_candidate
+    full = _full_slice_for_focusing_tests()
+    focused = slice_for_candidate(full, candidate_function="alpha", candidate_file="a.c")
+    names = {t["name"] for t in focused.config_mode_command_triggers}
+    assert names == {"WITH_A"}
+
+
+def test_slice_for_candidate_infers_file_when_not_provided():
+    """If candidate_file is omitted, slice_for_candidate looks it up
+    from the full slice."""
+    from check_me.step2.substrate_slice import slice_for_candidate
+    full = _full_slice_for_focusing_tests()
+    focused = slice_for_candidate(full, candidate_function="alpha")
+    # Should still narrow the per-file content to a.c.
+    assert all(a["file"] == "a.c" for a in focused.evidence_anchors)
+
+
+def test_slice_for_candidate_significantly_smaller_than_full():
+    """The whole point. Token-cost win."""
+    from check_me.step2.substrate_slice import slice_for_candidate
+    full = _full_slice_for_focusing_tests()
+    focused = slice_for_candidate(full, candidate_function="alpha", candidate_file="a.c")
+    full_size = len(full.to_json())
+    focused_size = len(focused.to_json())
+    assert focused_size < full_size
 
 
 def test_no_dataset_specific_branching():

@@ -81,6 +81,7 @@ def chat_json(
     schema: dict[str, Any] | None = None,
     max_retries: int = 2,
     max_tokens_ceiling: int = 8192,
+    extra_request: dict[str, Any] | None = None,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:
     """Issue a JSON-mode chat completion with retry on length /
@@ -104,6 +105,11 @@ def chat_json(
         attempts = ``1 + max_retries``.
     max_tokens_ceiling
         Cap for the ``max_tokens`` doubling on length-finish retries.
+    extra_request
+        Provider-specific knobs forwarded as ``ChatRequest.extra`` on
+        every attempt (e.g. ``{"reasoning_effort": "low"}`` to bound
+        Gemini's thinking budget on token-heavy prompts so visible
+        output isn't squeezed out).
     chat_fn
         Override only for tests — production code should never need
         this.
@@ -129,6 +135,8 @@ def chat_json(
             messages=base_messages + follow_ups,
             json_object=True,
         )
+        if extra_request:
+            request.extra.update(extra_request)
         # Inject a possibly-bumped max_tokens via extra so we don't
         # mutate the shared config dataclass.
         if cur_max_tokens != config.max_tokens:
