@@ -16,7 +16,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import ast_index, call_graph, data_control_flow, guards
+from . import (
+    ast_index,
+    call_graph,
+    data_control_flow,
+    guards,
+    trust_boundaries,
+)
 
 
 @dataclass
@@ -33,6 +39,7 @@ class RunReport:
     dcf_loop: int
     dcf_def_use: int
     guards_total: int
+    trust_total: int
 
 
 SCHEMA_VERSION = "v1"
@@ -61,6 +68,7 @@ def run(
     all_edges: list[call_graph.CallEdge] = []
     all_dcf: list[data_control_flow.DCFEntry] = []
     all_guards: list[guards.GuardEntry] = []
+    all_tb: list[trust_boundaries.TrustBoundary] = []
     parse_errors = 0
     for spec in specs:
         parsed = ast_index.parse_file(index, spec)
@@ -74,10 +82,16 @@ def run(
         all_guards.extend(
             guards.extract_guards_from_tu(parsed, project_root)
         )
+        all_tb.extend(
+            trust_boundaries.extract_trust_boundaries_from_tu(
+                parsed, project_root
+            )
+        )
 
     edges = call_graph.merge_edges(all_edges)
     dcf = data_control_flow.merge_dcf(all_dcf)
     guard_rows = guards.merge_guards(all_guards)
+    tb_rows = trust_boundaries.merge_trust_boundaries(all_tb)
     elapsed = time.monotonic() - started
 
     substrate: dict[str, Any] = {
@@ -88,7 +102,7 @@ def run(
             "call_graph": [e.to_json() for e in edges],
             "data_control_flow": [e.to_json() for e in dcf],
             "guards": [e.to_json() for e in guard_rows],
-            "trust_boundaries": [],
+            "trust_boundaries": [e.to_json() for e in tb_rows],
             "config_mode_command_triggers": [],
             "callback_registrations": [],
             "evidence_anchors": [],
@@ -107,6 +121,7 @@ def run(
         dcf_loop=sum(1 for d in dcf if d.kind == "loop"),
         dcf_def_use=sum(1 for d in dcf if d.kind == "def_use"),
         guards_total=len(guard_rows),
+        trust_total=len(tb_rows),
     )
     return substrate, report
 
