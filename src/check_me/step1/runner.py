@@ -20,6 +20,7 @@ from . import (
     ast_index,
     call_graph,
     callback_registrations,
+    config_triggers,
     data_control_flow,
     guards,
     trust_boundaries,
@@ -42,6 +43,7 @@ class RunReport:
     guards_total: int
     trust_total: int
     callbacks_total: int
+    config_total: int
 
 
 SCHEMA_VERSION = "v1"
@@ -101,6 +103,9 @@ def run(
     guard_rows = guards.merge_guards(all_guards)
     tb_rows = trust_boundaries.merge_trust_boundaries(all_tb)
     cb_rows = callback_registrations.merge_callback_regs(all_cb)
+    cfg_rows = config_triggers.merge_config_triggers(
+        config_triggers.extract_config_triggers(project_root, specs)
+    )
     elapsed = time.monotonic() - started
 
     substrate: dict[str, Any] = {
@@ -112,7 +117,9 @@ def run(
             "data_control_flow": [e.to_json() for e in dcf],
             "guards": [e.to_json() for e in guard_rows],
             "trust_boundaries": [e.to_json() for e in tb_rows],
-            "config_mode_command_triggers": [],
+            "config_mode_command_triggers": [
+                e.to_json() for e in cfg_rows
+            ],
             "callback_registrations": [e.to_json() for e in cb_rows],
             "evidence_anchors": [],
         },
@@ -132,6 +139,7 @@ def run(
         guards_total=len(guard_rows),
         trust_total=len(tb_rows),
         callbacks_total=len(cb_rows),
+        config_total=len(cfg_rows),
     )
     return substrate, report
 
