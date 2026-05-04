@@ -13,6 +13,7 @@ from typing import Any, Callable
 from ..llm.client import ChatRequest, ChatResponse, chat
 from ..llm.config import Config
 from ..llm.json_call import chat_json, CallResult
+from .miner import reasoning_extra
 from .prompts import (
     VERIFIER_OUTPUT_SCHEMA,
     build_verifier_messages,
@@ -29,23 +30,19 @@ def verify_one(
     *,
     max_retries: int = 2,
     max_tokens_ceiling: int = 16384,
-    reasoning_effort: str | None = "low",
+    reasoning_effort: str | None = "minimal",
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:
     """Verify a single candidate. ``candidate`` is the miner's full
     candidate dict; this function strips the miner-only keys before
     handing it to the verifier prompt builder.
 
-    ``reasoning_effort`` is set to ``"low"`` for the same reason as
-    in the miner — the verifier critiques against a focused
-    per-candidate slice and an unbounded thinking budget tends to
-    crowd out the visible JSON.
+    ``reasoning_effort`` defaults to ``"minimal"`` — see
+    :func:`check_me.step2.miner.mine` for the rationale.
     """
     structural = candidate_for_verifier(candidate)
     system, user = build_verifier_messages(slice_, structural)
-    extra: dict[str, Any] = {}
-    if reasoning_effort is not None:
-        extra["reasoning_effort"] = reasoning_effort
+    extra = reasoning_extra(reasoning_effort)
     return chat_json(
         client=client,
         config=config,

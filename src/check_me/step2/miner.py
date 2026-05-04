@@ -32,7 +32,7 @@ def mine(
     max_retries: int = 2,
     max_tokens_ceiling: int = 65536,
     min_max_tokens: int = MIN_MINER_MAX_TOKENS,
-    reasoning_effort: str | None = "low",
+    reasoning_effort: str | None = "minimal",
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:
     """Run the miner LLM and return the parsed candidate list.
@@ -42,27 +42,29 @@ def mine(
     enforced by ``chat_json``.
 
     ``max_tokens_ceiling`` is 64K because the slice for a large
-    project can be ~100K input tokens and Gemini 2.5/3 thinking
-    tokens count against the response budget alongside the visible
-    JSON output.
+    project can be ~100K input tokens.
 
     ``min_max_tokens`` is the first-attempt floor — see
     :data:`MIN_MINER_MAX_TOKENS`. Operator env values higher than the
     floor are respected; lower values are bumped up.
 
-    ``reasoning_effort`` is plumbed through ``ChatRequest.extra`` so
-    Gemini's OpenAI-compat layer caps its thinking budget. ``"low"``
-    is the default — the miner does pattern selection over a
-    structured slice, not deep deduction, so an unbounded thinking
-    budget mostly squeezes out the visible output. Set ``None`` to
-    let the provider pick.
+    ``reasoning_effort`` caps how many tokens the model spends on
+    internal reasoning before producing the visible JSON. Default
+    ``"minimal"``: empirically Gemini's OpenAI-compat exposes only
+    this OpenAI-standard knob (the native ``thinking_config`` is
+    rejected at the body parser), and ``"low"`` was observed to
+    leave thinking effectively unbounded on heavier prompts —
+    enough to fill the entire response window before any visible
+    output is emitted, producing finish_reason=length in a loop.
+    The miner does pattern selection over a structured slice, not
+    deep deduction, so ``"minimal"`` does not noticeably hurt
+    output quality. Providers that don't recognise the field
+    silently ignore it. Nothing here is dataset- or project-specific.
     """
     if config.max_tokens < min_max_tokens:
         config = replace(config, max_tokens=min_max_tokens)
     system, user = build_miner_messages(slice_)
-    extra: dict[str, Any] = {}
-    if reasoning_effort is not None:
-        extra["reasoning_effort"] = reasoning_effort
+    extra = reasoning_extra(reasoning_effort)
     return chat_json(
         client=client,
         config=config,
@@ -74,3 +76,13 @@ def mine(
         extra_request=extra or None,
         chat_fn=chat_fn,
     )
+
+
+def reasoning_extra(reasoning_effort: str | None) -> dict[str, Any]:
+    """Build a ``request.extra`` dict that caps internal-reasoning
+    tokens via the OpenAI standard ``reasoning_effort`` field.
+    Providers that don't recognise the field silently ignore it.
+    Runtime knob, not project-specific."""
+    if reasoning_effort is None:
+        return {}
+    return {"reasoning_effort": reasoning_effort}

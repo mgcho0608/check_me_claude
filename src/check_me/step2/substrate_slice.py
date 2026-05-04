@@ -98,9 +98,10 @@ class SubstrateSlice:
 def slice_substrate(
     substrate: dict[str, Any] | str | Path,
     *,
-    max_call_edges: int = 1500,
-    max_guards: int = 600,
-    max_anchors: int = 600,
+    max_call_edges: int = 800,
+    max_guards: int = 400,
+    max_anchors: int = 400,
+    max_config_triggers: int = 400,
 ) -> SubstrateSlice:
     """Build a :class:`SubstrateSlice` from a Step 1 substrate.
 
@@ -109,13 +110,16 @@ def slice_substrate(
     substrate
         Either a parsed JSON dict, a JSON string, or a path to a
         JSON file. The shape must match ``schemas/substrate.v1.json``.
-    max_call_edges, max_guards, max_anchors
-        Soft caps for the call_graph / guards / evidence_anchors
-        portions of the slice. The cap is necessary for very large
-        codebases (we have observed 15k+ call edges on full IoT
-        stacks); it kicks in only after the candidate-relevant
-        rows are retained, so it never drops something the miner
-        needs.
+    max_call_edges, max_guards, max_anchors, max_config_triggers
+        Soft caps for the post-relevance-filter slice. The caps
+        target a total slice of ~80K LLM tokens so that even
+        thinking-token-heavy providers (Gemini 2.5/3) have room
+        for the visible JSON response within their output budget.
+        Each cap kicks in *after* the candidate-relevance filter,
+        so excess rows that no candidate touches were already
+        dropped — the cap only trims the long tail of relevant-
+        but-redundant rows. Sorting is deterministic
+        (file → line → name) so the trimmed set is reproducible.
 
     Notes
     -----
@@ -188,6 +192,8 @@ def slice_substrate(
     ]
     config_rows.sort(key=lambda c: (c.get("file", ""), c.get("line") or 0,
                                        c.get("name", "")))
+    if len(config_rows) > max_config_triggers:
+        config_rows = config_rows[:max_config_triggers]
 
     # 7. Evidence anchors in those same files.
     all_anchors: list[dict[str, Any]] = list(cats.get("evidence_anchors", []))
