@@ -346,6 +346,41 @@ def test_compound_assignment_emits_def_use(tmp_path):
     assert any("s += n" in r["summary"] for r in assigns), assigns
 
 
+def test_pointer_dereference_lhs_assignment_emits_def_use(tmp_path):
+    """`*p++ = *sval;` is an assignment whose LHS contains the unary
+    dereference `*`. Earlier the heuristic mis-classified the leading
+    `*` as a binary multiplication and returned False. This test
+    pins the corrected behaviour: dereference-LHS writes are
+    captured. Mirrors dnsmasq's do_rfc1035_name inner write site
+    at util.c:257."""
+    rows = _dcf(
+        tmp_path,
+        """
+        void copy(char *p, const char *sval) {
+            while (*sval) *p++ = *sval++;
+        }
+        """,
+    )
+    assigns = [r for r in rows if r["kind"] == "def_use" and r["summary"].startswith("assign ")]
+    assert any(
+        "*p++" in r["summary"] and "*sval" in r["summary"]
+        for r in assigns
+    ), assigns
+
+
+def test_array_index_lhs_assignment_emits_def_use(tmp_path):
+    rows = _dcf(
+        tmp_path,
+        """
+        void f(int *a, int n) {
+            a[n] = 7;
+        }
+        """,
+    )
+    assigns = [r for r in rows if r["kind"] == "def_use" and r["summary"].startswith("assign ")]
+    assert any("a[n] = 7" in r["summary"] for r in assigns), assigns
+
+
 def test_struct_field_assignment_emits_def_use(tmp_path):
     """Mirrors libssh's session->session_state = X pattern."""
     rows = _dcf(

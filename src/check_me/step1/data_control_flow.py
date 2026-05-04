@@ -90,17 +90,28 @@ _NON_ASSIGN_OP_TOKENS = frozenset(
 
 
 def _is_assignment_cursor(cursor: cx.Cursor) -> bool:
+    """True if ``cursor`` is an assignment-flavour binary operator.
+
+    Robust to LHS shapes that contain operator-like tokens (e.g.
+    ``*p = ...`` where ``*`` is a unary dereference, ``a[i] = ...``,
+    ``(*foo)(...) = ...``). Strategy: walk the cursor's child
+    subtrees to count LHS tokens, then look at the very next token
+    of the parent cursor — that is the actual operator.
+    """
     if cursor.kind == cx.CursorKind.COMPOUND_ASSIGNMENT_OPERATOR:
         return True
     if cursor.kind != cx.CursorKind.BINARY_OPERATOR:
         return False
-    for tok in cursor.get_tokens():
-        s = tok.spelling
-        if s in _ASSIGN_TOKENS:
-            return True
-        if s in _NON_ASSIGN_OP_TOKENS:
-            return False
-    return False
+    kids = list(cursor.get_children())
+    if len(kids) != 2:
+        return False
+    lhs = kids[0]
+    lhs_token_count = sum(1 for _ in lhs.get_tokens())
+    parent_tokens = list(cursor.get_tokens())
+    if lhs_token_count >= len(parent_tokens):
+        return False
+    op_token = parent_tokens[lhs_token_count]
+    return op_token.spelling in _ASSIGN_TOKENS
 
 
 def _extent_lines(cursor: cx.Cursor) -> tuple[int, int]:
