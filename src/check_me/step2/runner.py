@@ -22,7 +22,6 @@ from typing import Any, Callable
 
 from ..llm.client import ChatRequest, ChatResponse, chat, make_client
 from ..llm.config import Config, StepKind, load_config
-from ..llm.json_call import CallResult
 from . import miner as miner_mod
 from . import verifier as verifier_mod
 from .substrate_slice import (
@@ -68,21 +67,42 @@ def run(
     verifier_client: Any | None = None,
     miner_chunk_size: int = miner_mod.DEFAULT_CHUNK_SIZE,
     miner_max_workers: int = miner_mod.DEFAULT_MAX_WORKERS,
-    verifier_max_workers: int = miner_mod.DEFAULT_MAX_WORKERS,
+    verifier_max_workers: int = 1,
+    verifier_retry_passes: int = 2,
+    verifier_retry_cooldown_sec: float = 60.0,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> tuple[dict[str, Any], RunReport]:
     """Run Step 2 end-to-end (lossless architecture).
 
     Step 2's miner is chunked: every function in the substrate
     slice's ``candidate_functions`` is sent through some chunk's
-    miner call. Each chunk also carries a discovery instruction so
-    the LLM can propose entrypoints outside the candidate set when
-    it spots cross-substrate patterns (indexed dispatchers etc.).
-    The merged candidate list is then verified — every row receives
-    an independent verifier critique with anchoring prevention.
-    Both miner chunks and verifier calls run in parallel via a
-    bounded thread pool (see ``miner_max_workers`` /
-    ``verifier_max_workers``).
+    miner call. Each chunk also carries an explicit cross-chunk
+    discovery instruction so the LLM can propose entrypoints
+    outside the candidate set when it spots cross-substrate
+    patterns (indexed dispatchers etc.). The merged candidate list
+    is then verified — every row receives an independent verifier
+    critique with anchoring prevention.
+
+    Resilience: a single verifier failure does not kill the whole
+    run. Each verifier call is wrapped; on raised exception (e.g.
+    LLM rate-limit retries exhausted), the candidate gets a
+    synthetic ``quarantined`` verdict whose ``quarantine_reason``
+    records the failure type. After the main pass, the runner
+    sweeps ``verifier_retry_passes`` more times sequentially over
+    the still-failed candidates with a ``verifier_retry_cooldown_sec``
+    sleep between passes (lets per-minute provider quotas refill).
+    Candidates that succeed in a retry get the real verifier
+    verdict; candidates that exhaust all retries keep the synthetic
+    quarantine — never silent-deleted, audit trail preserved per
+    PLAN Rule 4.
+
+    ``verifier_max_workers`` defaults to ``1`` (sequential):
+    candidate counts can be in the hundreds on stack-style C
+    codebases, and concurrent calls burst against per-minute
+    provider quotas. Sequential dispatch naturally paces under
+    quota; the retry passes handle transient hiccups.
+    ``miner_max_workers`` keeps the parallel default since chunk
+    counts are small (single-digit on typical projects).
 
     Configs and clients are optional — if not supplied, the runner
     loads them from the environment and constructs OpenAI SDK
@@ -128,41 +148,101 @@ def run(
         len(miner_result.per_chunk), len(proposed),
     )
 
-    # 2. Verifier (parallel) -------------------------------------------------
+    # 2. Verifier (parallel first pass, sequential retry passes) ------------
     # Per PLAN §0 / Rule 2b the verifier critiques ONE candidate at
     # a time on a focused per-candidate sub-slice; the slice walk
     # is a deterministic substrate operation, the verifier call is
     # an LLM critique. Both run independently per candidate, so
     # they parallelise naturally.
-    def _verify_one(cand: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], CallResult]:
+    #
+    # Resilience: each call is wrapped — on failure we emit a
+    # synthetic quarantined verdict with the failure recorded in
+    # ``quarantine_reason``. After the main pass, the runner
+    # sweeps the still-failed entries up to ``verifier_retry_passes``
+    # more times sequentially with a cooldown between passes so
+    # provider quotas can refill.
+    def _attempt_verify(cand: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Return (cand, verdict, info). info has ``ok: bool`` and
+        either ``attempts`` (on success) or ``error`` (on failure).
+        On failure a synthetic quarantined verdict is returned so
+        the run never partially-fails."""
         focused = slice_for_candidate(
             slice_,
             candidate_function=cand.get("function", ""),
             candidate_file=cand.get("file"),
         )
-        v_result = verifier_mod.verify_one(
-            client=verifier_client,
-            config=verifier_config,
-            slice_=focused,
-            candidate=cand,
-            chat_fn=chat_fn,
-        )
-        return cand, v_result.parsed, v_result
+        try:
+            v_result = verifier_mod.verify_one(
+                client=verifier_client,
+                config=verifier_config,
+                slice_=focused,
+                candidate=cand,
+                chat_fn=chat_fn,
+            )
+            return cand, v_result.parsed, {"ok": True, "attempts": v_result.attempts}
+        except Exception as exc:  # noqa: BLE001 — capture-all is the design
+            err_text = f"{type(exc).__name__}: {exc}"
+            synthetic = _synthetic_unverified_verdict(err_text)
+            return cand, synthetic, {"ok": False, "error": err_text[:300]}
 
-    final_entries: list[dict[str, Any]] = [None] * len(proposed)  # type: ignore[list-item]
-    verifier_calls: list[dict[str, Any]] = [None] * len(proposed)  # type: ignore[list-item]
-    kept = 0
-    quarantined = 0
+    # First pass — bounded parallelism (default sequential for verifier).
     if verifier_max_workers <= 1 or len(proposed) <= 1:
-        verdicts = [_verify_one(c) for c in proposed]
+        verdicts = [_attempt_verify(c) for c in proposed]
     else:
         with ThreadPoolExecutor(max_workers=verifier_max_workers) as ex:
-            futs = [(i, ex.submit(_verify_one, c)) for i, c in enumerate(proposed)]
+            futs = [(i, ex.submit(_attempt_verify, c)) for i, c in enumerate(proposed)]
             verdicts_indexed = [(i, f.result()) for i, f in futs]
             verdicts_indexed.sort(key=lambda p: p[0])
             verdicts = [v for _, v in verdicts_indexed]
 
-    for i, (cand, verdict, v_result) in enumerate(verdicts):
+    # Retry passes — sequentially re-attempt candidates whose first-pass
+    # verifier raised. Each pass is preceded by a cooldown so transient
+    # rate-limit windows can refill. Successful retries replace the
+    # synthetic verdict with the real one.
+    for retry_pass in range(1, verifier_retry_passes + 1):
+        failed_indices = [
+            i for i, (_, _, info) in enumerate(verdicts) if not info.get("ok")
+        ]
+        if not failed_indices:
+            break
+        logger.info(
+            "step2.verifier: retry pass %d/%d on %d failed candidate(s)"
+            " — sleeping %.0fs first for quota cooldown",
+            retry_pass, verifier_retry_passes,
+            len(failed_indices), verifier_retry_cooldown_sec,
+        )
+        if verifier_retry_cooldown_sec > 0:
+            time.sleep(verifier_retry_cooldown_sec)
+        for i in failed_indices:
+            cand = verdicts[i][0]
+            new_result = _attempt_verify(cand)
+            if new_result[2].get("ok"):
+                # Successful retry — overwrite synthetic verdict with the
+                # real one. Record retry pass for diagnostics.
+                _, real_verdict, info = new_result
+                info = {**info, "retry_pass": retry_pass}
+                verdicts[i] = (cand, real_verdict, info)
+            else:
+                # Still failing — keep synthetic but update reason text
+                # to reflect the retry budget consumed.
+                _, synthetic, info = new_result
+                synthetic = {
+                    **synthetic,
+                    "quarantine_reason": (
+                        f"verifier unreachable after {retry_pass} retry pass(es): "
+                        f"{info.get('error', 'unknown error')}"
+                    )[:600],
+                }
+                info = {**info, "retry_pass": retry_pass}
+                verdicts[i] = (cand, synthetic, info)
+
+    # Build final entries from (possibly-retried) verdicts.
+    final_entries: list[dict[str, Any]] = [None] * len(proposed)  # type: ignore[list-item]
+    verifier_calls: list[dict[str, Any]] = [None] * len(proposed)  # type: ignore[list-item]
+    kept = 0
+    quarantined = 0
+
+    for i, (cand, verdict, info) in enumerate(verdicts):
         merged = _merge_candidate_verdict(cand, verdict)
         final_entries[i] = merged
         if merged["status"] == "kept":
@@ -172,7 +252,7 @@ def run(
         verifier_calls[i] = {
             "candidate_id": cand.get("id"),
             "verdict": verdict.get("verdict"),
-            "attempts": v_result.attempts,
+            **info,
         }
 
     elapsed = time.monotonic() - start
@@ -200,6 +280,33 @@ def run(
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+def _synthetic_unverified_verdict(error_text: str) -> dict[str, Any]:
+    """Build a quarantined-with-failure-reason verdict to substitute
+    when the verifier LLM call raised. Shape matches the verifier's
+    real output schema closely enough for ``_merge_candidate_verdict``
+    to consume it. The fact that this is synthetic is recorded in
+    ``quarantine_reason``; downstream Step 3 can detect the
+    "verifier unreachable:" prefix and decide whether to re-run.
+    Per CLAUDE.md / PLAN Rule 4: silent delete is forbidden — every
+    candidate that the miner proposed appears in entrypoints.json,
+    even when the verifier could not reach it."""
+    return {
+        "verdict": "quarantined",
+        "reachability": "<verifier unreachable>",
+        "attacker_controllability": "<verifier unreachable>",
+        "assumptions": [],
+        "supporting_substrate_edges": [],
+        "refuting_substrate_edges": [],
+        "quarantine_reason": f"verifier unreachable: {error_text}"[:600],
+        "confidence": "low",
+        "uncertainty": (
+            "verifier did not return a verdict for this candidate;"
+            " status reflects an LLM-call failure, not a substrate"
+            " judgement. Downstream steps may re-run."
+        ),
+    }
 
 
 def _merge_candidate_verdict(

@@ -321,3 +321,143 @@ def test_empty_miner_output_yields_empty_entrypoints():
     assert report.candidates_proposed == 0
     # No verifier calls when no candidates.
     assert len(seq.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Resilience: verifier failure fallback + retry passes
+# --------------------------------------------------------------------------- #
+
+
+class _FlakyChat:
+    """chat_fn that lets the miner call through then raises on the
+    next N verifier calls before recovering. Lets us simulate a
+    transient provider outage and assert run-level resilience."""
+
+    def __init__(self, miner_resp: ChatResponse,
+                 verifier_resp: ChatResponse,
+                 fail_count: int,
+                 fail_exc: Exception | None = None):
+        self.miner_resp = miner_resp
+        self.verifier_resp = verifier_resp
+        self.fail_remaining = fail_count
+        self.fail_exc = fail_exc or RuntimeError("simulated provider failure")
+        self.calls = []
+
+    def __call__(self, client, config, request: ChatRequest) -> ChatResponse:
+        self.calls.append({"client": client})
+        # Heuristic: miner prompt is the only one whose user message
+        # mentions "Assigned candidates" (the chunked miner) or
+        # "no chunking" (the single-call backwards-compat path).
+        user_msg = request.messages[-1]["content"]
+        is_miner = (
+            "Assigned candidates" in user_msg or "no chunking" in user_msg
+            or "single-call" in user_msg
+        )
+        if is_miner:
+            return self.miner_resp
+        # Verifier branch.
+        if self.fail_remaining > 0:
+            self.fail_remaining -= 1
+            raise self.fail_exc
+        return self.verifier_resp
+
+
+def test_verifier_failure_yields_synthetic_quarantine_in_output():
+    """A single verifier call's exception must NOT kill the run.
+    The candidate appears in the output as quarantined with a
+    quarantine_reason that documents the failure (silent delete is
+    forbidden per PLAN Rule 4)."""
+    flaky = _FlakyChat(
+        miner_resp=_resp(_miner_response_one_kept_candidate()),
+        verifier_resp=_resp(_verifier_kept_response()),
+        fail_count=99,  # always fails — exhausts both retry passes
+    )
+    output, report = runner_mod.run(
+        _empty_substrate(),
+        miner_config=_cfg(), verifier_config=_cfg(),
+        miner_client="m", verifier_client="v",
+        verifier_retry_cooldown_sec=0,  # don't slow tests
+        chat_fn=flaky,
+    )
+
+    assert len(output["entrypoints"]) == 1
+    row = output["entrypoints"][0]
+    assert row["status"] == "quarantined"
+    assert "verifier unreachable" in row.get("quarantine_reason", "")
+    # The failure mode bubbles through the report so callers can
+    # see how many candidates were unverified.
+    failed = [c for c in report.verifier_calls if not c.get("ok", True)]
+    assert len(failed) == 1
+
+
+def test_verifier_retry_pass_recovers_transient_failure():
+    """If the first pass fails but a retry pass succeeds, the
+    candidate's row reflects the *real* verifier verdict, and
+    the synthetic quarantine is overwritten."""
+    # Fail the very first verifier call, succeed on the retry.
+    flaky = _FlakyChat(
+        miner_resp=_resp(_miner_response_one_kept_candidate()),
+        verifier_resp=_resp(_verifier_kept_response()),
+        fail_count=1,
+    )
+    output, report = runner_mod.run(
+        _empty_substrate(),
+        miner_config=_cfg(), verifier_config=_cfg(),
+        miner_client="m", verifier_client="v",
+        verifier_retry_cooldown_sec=0,
+        verifier_retry_passes=2,
+        chat_fn=flaky,
+    )
+
+    assert len(output["entrypoints"]) == 1
+    row = output["entrypoints"][0]
+    assert row["status"] == "kept"
+    # Real verifier reachability prose flows through (not the
+    # placeholder we use for synthetic verdicts).
+    assert "<verifier unreachable>" not in (row.get("reachability") or "")
+    # Diagnostic shows it took a retry pass.
+    assert any(c.get("retry_pass") for c in report.verifier_calls)
+
+
+def test_verifier_retry_passes_default_to_two():
+    """Default ``verifier_retry_passes=2`` means a transient
+    outage that lasts through the first pass and one retry can
+    still be recovered on the second retry."""
+    # Fail first pass (1 call) + first retry pass (1 call) = 2
+    # failures, then succeed.
+    flaky = _FlakyChat(
+        miner_resp=_resp(_miner_response_one_kept_candidate()),
+        verifier_resp=_resp(_verifier_kept_response()),
+        fail_count=2,
+    )
+    output, _ = runner_mod.run(
+        _empty_substrate(),
+        miner_config=_cfg(), verifier_config=_cfg(),
+        miner_client="m", verifier_client="v",
+        verifier_retry_cooldown_sec=0,
+        chat_fn=flaky,
+    )
+    row = output["entrypoints"][0]
+    assert row["status"] == "kept", row
+
+
+def test_verifier_retry_exhausted_keeps_synthetic_quarantine():
+    """When all retry passes also fail, the synthetic verdict is
+    preserved and quarantine_reason reflects the retry budget."""
+    flaky = _FlakyChat(
+        miner_resp=_resp(_miner_response_one_kept_candidate()),
+        verifier_resp=_resp(_verifier_kept_response()),
+        fail_count=99,  # all attempts fail
+    )
+    output, _ = runner_mod.run(
+        _empty_substrate(),
+        miner_config=_cfg(), verifier_config=_cfg(),
+        miner_client="m", verifier_client="v",
+        verifier_retry_cooldown_sec=0,
+        verifier_retry_passes=2,
+        chat_fn=flaky,
+    )
+    row = output["entrypoints"][0]
+    assert row["status"] == "quarantined"
+    reason = row.get("quarantine_reason", "")
+    assert "retry pass" in reason  # records that retries were attempted
