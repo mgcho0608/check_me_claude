@@ -174,14 +174,30 @@ def _extract_function_tables(
 
 
 def _is_function_pointer_type(type_text: str) -> bool:
-    """True if the type spelling looks like a function pointer."""
+    """True if the type spelling looks like a function pointer.
+
+    Primary signal is the syntactic ``(*`` substring; this matches
+    raw function-pointer types after typedef expansion via
+    ``cursor.type.get_canonical()``.
+
+    A small fallback set of suffixes catches typedef'd aliases when
+    canonicalization is unavailable (e.g. a typedef whose definition
+    was not visible during parsing). The suffixes are restricted to
+    those that conventionally indicate a callback role
+    (``_cb``, ``_callback``, ``_handler``, ``_fn``) — broader
+    suffixes like ``_t`` and ``_data`` were rejected because they
+    appear on many non-function-pointer typedefs and would inject
+    false positives that bias the extractor toward whatever project
+    happens to use those names. The contract is to be project-
+    agnostic, not to maximize gold match on any one dataset.
+    """
     t = type_text.strip()
     if "(*" in t:
         return True
     if t.endswith("(*)"):  # rare but valid
         return True
-    suffixes = ("_t", "_cb", "_callback", "_handler", "_fn", "_data")
-    return any(t.endswith(s) for s in suffixes)
+    callback_suffixes = ("_cb", "_callback", "_handler", "_fn")
+    return any(t.endswith(s) for s in callback_suffixes)
 
 
 def _lhs_is_callback_target(lhs: cx.Cursor) -> bool:
