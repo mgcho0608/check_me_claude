@@ -274,7 +274,7 @@ Evaluation datasets must be grounded in externally verifiable truth. The hierarc
 
 Single-file test fixtures are insufficient. The pipeline requires codebases with:
 
-- **Multiple source files** (10-20 files) with inter-file dependencies
+- **Multiple source files with inter-file dependencies.** No fixed lower or upper bound on file count — small utilities and substantially larger projects are both acceptable as long as the self-contained rule (4.2.1) holds. Linux-kernel-scale projects remain low priority for separate reasons (see 4.2.1).
 - **A build system** (Makefile or compile_commands.json) with at least 2 build configurations
 - **Multiple entry points or command modes** (e.g., --mode usb, --mode network, --mode recovery)
 - **Interprocedural state sharing** (global variables, shared headers)
