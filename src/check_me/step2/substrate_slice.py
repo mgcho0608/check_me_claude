@@ -95,10 +95,82 @@ class SubstrateSlice:
 # --------------------------------------------------------------------------- #
 
 
+def _select_per_candidate_edges(
+    all_edges: list[dict[str, Any]],
+    *,
+    candidate_funcs: set[str],
+    max_total: int,
+) -> list[dict[str, Any]]:
+    """Distribute the ``max_total`` budget fairly across candidates.
+
+    The previous behaviour was ``sort by (file, line, caller, callee)
+    then truncate``. Sort-then-truncate has a fairness bug: edges are
+    grouped by file, so candidates whose definitions live in
+    alphabetically-late files (e.g. ``os/net/...`` after
+    ``arch/cpu/...``) had their entire neighbourhood dropped while
+    early-alphabet candidates kept all theirs. The downstream
+    ``slice_for_candidate`` walk then had nothing to traverse for
+    those candidates regardless of hop depth.
+
+    Round-robin selection: iterate the sorted candidate list, take
+    one edge per candidate per pass (deterministic file/line order
+    within each candidate), repeat until the budget is exhausted or
+    every candidate has been drained. An edge that touches two
+    candidates (caller and callee both in ``candidate_funcs``) is
+    kept once and counts for both. Final list is sorted for stable
+    serialisation. Project-agnostic: walks substrate fields the
+    schema defines.
+    """
+    sort_key = (
+        lambda e: (e.get("file", ""), e.get("line") or 0,
+                   e.get("caller", ""), e.get("callee", ""))
+    )
+    edges_by_cand: dict[str, list[dict[str, Any]]] = {
+        c: [] for c in candidate_funcs
+    }
+    for e in all_edges:
+        for endpoint in ("caller", "callee"):
+            v = e.get(endpoint)
+            if isinstance(v, str) and v in candidate_funcs:
+                edges_by_cand[v].append(e)
+    for c in edges_by_cand:
+        edges_by_cand[c].sort(key=sort_key)
+
+    selected_ids: set[int] = set()
+    selected: list[dict[str, Any]] = []
+    candidates_sorted = sorted(edges_by_cand.keys())
+    indices: dict[str, int] = {c: 0 for c in candidates_sorted}
+    drained: set[str] = set()
+
+    while len(selected) < max_total and len(drained) < len(candidates_sorted):
+        progressed = False
+        for c in candidates_sorted:
+            if c in drained or len(selected) >= max_total:
+                continue
+            edges = edges_by_cand[c]
+            i = indices[c]
+            while i < len(edges) and id(edges[i]) in selected_ids:
+                i += 1
+            if i >= len(edges):
+                drained.add(c)
+                indices[c] = i
+                continue
+            e = edges[i]
+            selected.append(e)
+            selected_ids.add(id(e))
+            indices[c] = i + 1
+            progressed = True
+        if not progressed:
+            break
+
+    selected.sort(key=sort_key)
+    return selected
+
+
 def slice_substrate(
     substrate: dict[str, Any] | str | Path,
     *,
-    max_call_edges: int = 800,
+    max_call_edges: int = 1500,
     max_guards: int = 400,
     max_anchors: int = 400,
     max_config_triggers: int = 400,
@@ -146,17 +218,17 @@ def slice_substrate(
             candidate_funcs.add(r["callback_function"])
 
     # 2. Neighborhood: call_graph edges where caller OR callee is a
-    #    candidate. Sorted for determinism then capped.
+    #    candidate. Edges are distributed across candidates with a
+    #    fair quota so no candidate's chain gets dropped wholesale
+    #    by an alphabetical sort + truncate (the prior cap behaviour
+    #    silently zeroed out evidence for candidates whose files
+    #    sort late, e.g. ``os/net/...`` after ``arch/cpu/...``).
     all_edges: list[dict[str, Any]] = list(cats.get("call_graph", []))
-    neighbor_edges: list[dict[str, Any]] = [
-        e
-        for e in all_edges
-        if e.get("caller") in candidate_funcs or e.get("callee") in candidate_funcs
-    ]
-    neighbor_edges.sort(key=lambda e: (e.get("file", ""), e.get("line") or 0,
-                                        e.get("caller", ""), e.get("callee", "")))
-    if len(neighbor_edges) > max_call_edges:
-        neighbor_edges = neighbor_edges[:max_call_edges]
+    neighbor_edges = _select_per_candidate_edges(
+        all_edges,
+        candidate_funcs=candidate_funcs,
+        max_total=max_call_edges,
+    )
 
     # 3. Expanded function set: candidates + their neighbors.
     expanded_funcs = set(candidate_funcs)
@@ -236,11 +308,81 @@ def _load(substrate: dict | str | Path) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def _call_neighborhood(
+    full: SubstrateSlice,
+    *,
+    seed_function: str,
+    seed_file: str | None,
+    hop_depth: int,
+) -> set[str]:
+    """BFS the call_graph from ``seed_function`` in both directions
+    out to ``hop_depth`` and return the set of function names
+    reached.
+
+    The seed step (distance 1 from the candidate) honours
+    ``seed_file`` for outgoing edges (caller == seed): this
+    disambiguates same-name C overloads across translation units
+    by anchoring the chain to the seed's actual definition file.
+    Inbound edges (callee == seed) are not file-disambiguated — the
+    edge's ``file`` field pins the *call site*, not the seed's
+    body, and we want every caller regardless of where it lives.
+
+    Subsequent hops (distance 2+) are name-only: the chain has
+    already left the seed and the substrate's call_graph names are
+    used as identifiers. Multiple overloads sharing a name will be
+    over-approximated as one node — acceptable because such
+    collisions are rare and the verifier sees the per-candidate
+    slice with that conservative shape.
+
+    Project-agnostic: walks substrate fields the schema defines.
+    No project name, CVE, or symbol-pattern branching.
+    """
+    if hop_depth < 1:
+        return {seed_function}
+
+    # Hop 1 — file-disambiguated for the outgoing side.
+    visited: set[str] = {seed_function}
+    frontier: set[str] = set()
+    for e in full.call_graph:
+        caller = e.get("caller")
+        callee = e.get("callee")
+        if not isinstance(caller, str) or not isinstance(callee, str):
+            continue
+        if caller == seed_function:
+            if seed_file is not None and e.get("file") != seed_file:
+                continue
+            frontier.add(callee)
+        if callee == seed_function:
+            frontier.add(caller)
+    frontier.discard(seed_function)
+    visited |= frontier
+
+    # Hops 2..N — name-only.
+    for _ in range(hop_depth - 1):
+        nxt: set[str] = set()
+        for e in full.call_graph:
+            caller = e.get("caller")
+            callee = e.get("callee")
+            if not isinstance(caller, str) or not isinstance(callee, str):
+                continue
+            if caller in frontier:
+                nxt.add(callee)
+            if callee in frontier:
+                nxt.add(caller)
+        nxt -= visited
+        if not nxt:
+            break
+        visited |= nxt
+        frontier = nxt
+    return visited
+
+
 def slice_for_candidate(
     full: SubstrateSlice,
     *,
     candidate_function: str,
     candidate_file: str | None = None,
+    hop_depth: int = 2,
 ) -> SubstrateSlice:
     """Return a candidate-focused projection of ``full`` for the
     verifier.
@@ -249,34 +391,40 @@ def slice_for_candidate(
     a time. Sending the full project slice on every verifier call is
     wasteful — the verifier's questions ("is this reachable? is the
     attacker in control?") only need substrate evidence about the
-    specific candidate, not the whole project.
+    candidate and its near neighbourhood, not the whole project.
 
-    The focused slice keeps:
+    Hop depth: the slice keeps everything reachable from the
+    candidate within ``hop_depth`` call-graph hops in either
+    direction (BFS). ``hop_depth=2`` matches the depth Step 3
+    retrieval uses (PLAN §3, "N=2 hybrid"), giving the verifier the
+    same chain visibility — wrapper-style entrypoints whose
+    candidate function does not itself touch a syscall but whose
+    immediate callees do (a common shape in any layered protocol
+    stack: the candidate dispatches into helpers that call
+    ``recv``/``read``/etc.) become reachable inside the slice rather
+    than appearing to the verifier as evidence-less.
 
-    - the trust_boundaries row(s) for ``candidate_function`` and (as
-      project-wide context) other trust_boundaries in the same file,
-    - all callback_registrations whose ``callback_function`` is the
-      candidate (these directly refute or support callback-style
-      reachability),
-    - call_graph edges where caller == candidate or callee ==
-      candidate (one-hop in/out),
-    - guards in ``candidate_function`` only,
+    The focused slice keeps, against the resulting neighbourhood:
+
+    - trust_boundaries rows whose ``function`` is in the
+      neighbourhood, plus other trust_boundaries in the candidate's
+      file as project-wide context.
+    - callback_registrations whose ``callback_function`` or
+      ``function`` is in the neighbourhood, plus other rows in the
+      candidate's file.
+    - call_graph edges where BOTH endpoints are in the
+      neighbourhood (i.e. the induced subgraph; this prevents
+      leaking 3-hop fragments through a single hop endpoint).
+    - guards whose ``function`` is in the neighbourhood.
     - evidence_anchors and config_mode_command_triggers in
-      ``candidate_file`` only (small, cheap per-file context).
+      ``candidate_file`` only (small, cheap per-file context;
+      file-bound by design, not graph-walked).
 
     Same-name disambiguation: when ``candidate_file`` is supplied,
-    rows that name the candidate function are matched on
-    ``(function, file)`` together. C codebases routinely have
-    multiple ``static`` definitions sharing a function name across
-    translation units — a high-level API stub in one file and the
-    low-level handler with the same name in another is a common
-    layering pattern. Without file disambiguation, evidence about
-    the unrelated overload leaks into the verifier's slice. Edges'
-    ``file`` field pins the *call site*, so caller-side matches are
-    file-disambiguated but callee-side matches stay name-only (the
-    candidate is already file-identified by its definition; we
-    want to see everything it calls regardless of where the call
-    happens).
+    the seed-level call_graph edges are matched on
+    ``(caller, file)`` together. Subsequent hops are name-only —
+    once the chain leaves the seed, the call_graph identifiers are
+    used as substrate keys.
 
     The selection rule is project-agnostic — it walks substrate
     fields the schema defines, never special-cases a project name
@@ -296,39 +444,69 @@ def slice_for_candidate(
 
     same_file = (lambda f: f == candidate_file) if candidate_file else (lambda f: False)
 
-    def _is_candidate(row: dict[str, Any], name_field: str) -> bool:
-        """Match a row to the candidate by ``(name, file)`` when
-        ``candidate_file`` is set, falling back to name-only when it
-        isn't. Rows without a ``file`` field still match on name."""
-        if row.get(name_field) != candidate_function:
+    neighborhood = _call_neighborhood(
+        full,
+        seed_function=candidate_function,
+        seed_file=candidate_file,
+        hop_depth=hop_depth,
+    )
+
+    def _row_in_neighborhood(name: str | None, file: str | None) -> bool:
+        """A function-named row is in the focused slice if either:
+
+        (a) the function name is the candidate's AND (when
+            ``candidate_file`` is set) the row's file matches —
+            same-name overload disambiguation at the seed level,
+            consistent with how _call_neighborhood disambiguates
+            the seed step;
+        (b) the function name is some other member of the
+            ``hop_depth``-neighbourhood — name-only is fine here
+            because the chain has already left the seed.
+        """
+        if not isinstance(name, str):
             return False
-        if candidate_file is None:
-            return True
-        rf = row.get("file")
-        return rf is None or rf == candidate_file
+        if name == candidate_function:
+            if candidate_file is None:
+                return True
+            return file is None or file == candidate_file
+        return name in neighborhood
 
     trust = [
         r for r in full.trust_boundaries
-        if _is_candidate(r, "function")
+        if _row_in_neighborhood(r.get("function"), r.get("file"))
         or (r.get("function") != candidate_function and same_file(r.get("file")))
     ]
     callbacks = [
         r for r in full.callback_registrations
-        if _is_candidate(r, "callback_function")
-        or _is_candidate(r, "function")
+        if _row_in_neighborhood(r.get("callback_function"), r.get("file"))
+        or _row_in_neighborhood(r.get("function"), r.get("file"))
         or (
             r.get("callback_function") != candidate_function
             and r.get("function") != candidate_function
             and same_file(r.get("file"))
         )
     ]
+    # Edges among neighbourhood functions form the induced subgraph.
+    # The seed-level same-name overload is already filtered out by
+    # _call_neighborhood (outgoing edges of the seed are anchored to
+    # candidate_file). Edges where the *seed* itself appears with a
+    # different file are excluded here too, mirroring that.
+    def _edge_seed_file_ok(e: dict[str, Any]) -> bool:
+        if candidate_file is None:
+            return True
+        if e.get("caller") == candidate_function:
+            return e.get("file") is None or e.get("file") == candidate_file
+        return True
+
     edges = [
         e for e in full.call_graph
-        if _is_candidate(e, "caller") or e.get("callee") == candidate_function
+        if e.get("caller") in neighborhood
+        and e.get("callee") in neighborhood
+        and _edge_seed_file_ok(e)
     ]
     guards = [
         g for g in full.guards
-        if _is_candidate(g, "function")
+        if _row_in_neighborhood(g.get("function"), g.get("file"))
     ]
     anchors = [a for a in full.evidence_anchors if same_file(a.get("file"))]
     cfg = [t for t in full.config_mode_command_triggers if same_file(t.get("file"))]

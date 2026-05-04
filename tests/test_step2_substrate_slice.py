@@ -250,16 +250,99 @@ def test_slice_for_candidate_narrows_to_function_only_guards():
     assert {g["function"] for g in focused.guards} == {"alpha"}
 
 
-def test_slice_for_candidate_one_hop_call_graph_only():
+def test_slice_for_candidate_call_graph_is_neighborhood_induced_subgraph():
+    """The call_graph in the focused slice is the induced subgraph
+    of the candidate's ``hop_depth``-neighbourhood (default 2 —
+    matches Step 3's N=2 retrieval, gives the verifier visibility
+    into wrapper-style chains where the candidate dispatches to
+    helpers that touch syscalls). Edges into / out of an
+    unrelated candidate's subgraph (here ``beta -> other``) must
+    not appear in alpha's focused slice."""
     from check_me.step2.substrate_slice import slice_for_candidate
     full = _full_slice_for_focusing_tests()
     focused = slice_for_candidate(full, candidate_function="alpha", candidate_file="a.c")
     pairs = sorted({(e["caller"], e["callee"]) for e in focused.call_graph})
-    # alpha->helper (alpha as caller) and z->alpha (alpha as callee).
-    # beta->other must drop.
+    # Alpha's 2-hop neighbourhood: {alpha, alpha_helper, z}. The
+    # induced subgraph contains alpha->alpha_helper and z->alpha.
     assert ("alpha", "alpha_helper") in pairs
     assert ("z", "alpha") in pairs
+    # Beta's subgraph is disjoint from alpha's: must not leak.
     assert ("beta", "other") not in pairs
+
+
+def test_slice_for_candidate_two_hop_reaches_callees_of_callees():
+    """When the candidate's 1-hop callee itself calls a syscall
+    wrapper, the verifier sees that 2-hop edge — this is what
+    enables wrapper-style entrypoint validation. ``hop_depth=1``
+    would have hidden the chain end."""
+    from check_me.step2.substrate_slice import (
+        slice_for_candidate,
+        slice_substrate,
+    )
+    sub = _empty_substrate()
+    sub["categories"]["trust_boundaries"] = [
+        # Candidate (entry function) — not itself a syscall.
+        {"kind": "network_socket", "function": "entry",
+         "file": "a.c", "line": 1, "direction": "untrusted_to_trusted"},
+        # 2-hop downstream — the actual syscall site.
+        {"kind": "network_socket", "function": "deep_io",
+         "file": "c.c", "line": 30, "direction": "untrusted_to_trusted"},
+    ]
+    sub["categories"]["call_graph"] = [
+        {"caller": "entry", "callee": "wrapper",
+         "file": "a.c", "line": 5, "kind": "direct"},
+        {"caller": "wrapper", "callee": "deep_io",
+         "file": "b.c", "line": 20, "kind": "direct"},
+    ]
+    full = slice_substrate(sub)
+    focused = slice_for_candidate(full,
+                                  candidate_function="entry",
+                                  candidate_file="a.c",
+                                  hop_depth=2)
+    funcs_in_edges = {e["caller"] for e in focused.call_graph} | {
+        e["callee"] for e in focused.call_graph
+    }
+    assert "deep_io" in funcs_in_edges, (
+        "2-hop neighbourhood should reach the syscall site through wrapper"
+    )
+    # And the trust_boundary at the chain end should be in the slice
+    # so the verifier can cite it as evidence of attacker-controlled
+    # bytes flowing through the candidate.
+    deep_io_tb = [r for r in focused.trust_boundaries if r.get("function") == "deep_io"]
+    assert len(deep_io_tb) == 1, focused.trust_boundaries
+
+
+def test_slice_for_candidate_hop_depth_one_falls_back_to_direct_neighbours():
+    """``hop_depth=1`` keeps only the candidate's direct callees /
+    callers — useful as a tightening knob on very dense graphs."""
+    from check_me.step2.substrate_slice import (
+        slice_for_candidate,
+        slice_substrate,
+    )
+    sub = _empty_substrate()
+    sub["categories"]["trust_boundaries"] = [
+        {"kind": "network_socket", "function": "entry",
+         "file": "a.c", "line": 1, "direction": "untrusted_to_trusted"},
+        {"kind": "network_socket", "function": "deep_io",
+         "file": "c.c", "line": 30, "direction": "untrusted_to_trusted"},
+    ]
+    sub["categories"]["call_graph"] = [
+        {"caller": "entry", "callee": "wrapper",
+         "file": "a.c", "line": 5, "kind": "direct"},
+        {"caller": "wrapper", "callee": "deep_io",
+         "file": "b.c", "line": 20, "kind": "direct"},
+    ]
+    full = slice_substrate(sub)
+    focused = slice_for_candidate(full,
+                                  candidate_function="entry",
+                                  candidate_file="a.c",
+                                  hop_depth=1)
+    funcs_in_edges = {e["caller"] for e in focused.call_graph} | {
+        e["callee"] for e in focused.call_graph
+    }
+    assert "deep_io" not in funcs_in_edges
+    deep_io_tb = [r for r in focused.trust_boundaries if r.get("function") == "deep_io"]
+    assert deep_io_tb == []
 
 
 def test_slice_for_candidate_callback_registrations_match_function():
