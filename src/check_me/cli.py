@@ -43,7 +43,8 @@ def _step1(args: argparse.Namespace) -> int:
         f"(branch={report.dcf_branch} loop={report.dcf_loop} "
         f"def_use={report.dcf_def_use}), "
         f"{report.guards_total} guards, "
-        f"{report.trust_total} trust boundaries "
+        f"{report.trust_total} trust boundaries, "
+        f"{report.callbacks_total} callbacks "
         f"in {report.elapsed_sec:.1f}s -> {out}"
     )
     return 0

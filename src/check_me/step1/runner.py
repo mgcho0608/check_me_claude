@@ -19,6 +19,7 @@ from typing import Any
 from . import (
     ast_index,
     call_graph,
+    callback_registrations,
     data_control_flow,
     guards,
     trust_boundaries,
@@ -40,6 +41,7 @@ class RunReport:
     dcf_def_use: int
     guards_total: int
     trust_total: int
+    callbacks_total: int
 
 
 SCHEMA_VERSION = "v1"
@@ -69,6 +71,7 @@ def run(
     all_dcf: list[data_control_flow.DCFEntry] = []
     all_guards: list[guards.GuardEntry] = []
     all_tb: list[trust_boundaries.TrustBoundary] = []
+    all_cb: list[callback_registrations.CallbackReg] = []
     parse_errors = 0
     for spec in specs:
         parsed = ast_index.parse_file(index, spec)
@@ -87,11 +90,17 @@ def run(
                 parsed, project_root
             )
         )
+        all_cb.extend(
+            callback_registrations.extract_callback_regs_from_tu(
+                parsed, project_root
+            )
+        )
 
     edges = call_graph.merge_edges(all_edges)
     dcf = data_control_flow.merge_dcf(all_dcf)
     guard_rows = guards.merge_guards(all_guards)
     tb_rows = trust_boundaries.merge_trust_boundaries(all_tb)
+    cb_rows = callback_registrations.merge_callback_regs(all_cb)
     elapsed = time.monotonic() - started
 
     substrate: dict[str, Any] = {
@@ -104,7 +113,7 @@ def run(
             "guards": [e.to_json() for e in guard_rows],
             "trust_boundaries": [e.to_json() for e in tb_rows],
             "config_mode_command_triggers": [],
-            "callback_registrations": [],
+            "callback_registrations": [e.to_json() for e in cb_rows],
             "evidence_anchors": [],
         },
     }
@@ -122,6 +131,7 @@ def run(
         dcf_def_use=sum(1 for d in dcf if d.kind == "def_use"),
         guards_total=len(guard_rows),
         trust_total=len(tb_rows),
+        callbacks_total=len(cb_rows),
     )
     return substrate, report
 
