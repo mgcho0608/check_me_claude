@@ -1,0 +1,46 @@
+"""Verifier — independently critique each entrypoint candidate.
+
+Per PLAN §0 / Rule 2b: the verifier runs in a *fresh* LLM session
+and never receives the miner's chain of thought. The runner enforces
+this by stripping the miner-only keys from the candidate dict before
+calling :func:`verify_one` (see ``prompts.candidate_for_verifier``).
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from ..llm.client import ChatRequest, ChatResponse, chat
+from ..llm.config import Config
+from ..llm.json_call import chat_json, CallResult
+from .prompts import (
+    VERIFIER_OUTPUT_SCHEMA,
+    build_verifier_messages,
+    candidate_for_verifier,
+)
+from .substrate_slice import SubstrateSlice
+
+
+def verify_one(
+    client: Any,
+    config: Config,
+    slice_: SubstrateSlice,
+    candidate: dict[str, Any],
+    *,
+    max_retries: int = 2,
+    chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
+) -> CallResult:
+    """Verify a single candidate. ``candidate`` is the miner's full
+    candidate dict; this function strips the miner-only keys before
+    handing it to the verifier prompt builder."""
+    structural = candidate_for_verifier(candidate)
+    system, user = build_verifier_messages(slice_, structural)
+    return chat_json(
+        client=client,
+        config=config,
+        system=system,
+        user=user,
+        schema=VERIFIER_OUTPUT_SCHEMA,
+        max_retries=max_retries,
+        chat_fn=chat_fn,
+    )

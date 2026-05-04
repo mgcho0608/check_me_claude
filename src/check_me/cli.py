@@ -31,6 +31,7 @@ from pathlib import Path
 from .step1 import call_graph as cg_mod
 from .step1 import regex_baseline as regex_mod
 from .step1 import runner as step1_runner
+from .step2 import runner as step2_runner
 
 
 def _step1(args: argparse.Namespace) -> int:
@@ -201,8 +202,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     p2.set_defaults(func=_regex_compare)
 
+    p3 = sub.add_parser(
+        "step2",
+        help=(
+            "Run Step 2 (LLM entrypoint mining + verification) over a"
+            " Step 1 substrate JSON. Reads CHECK_ME_LLM_* from env or .env."
+        ),
+    )
+    p3.add_argument("--substrate", required=True, help="path to a step1 substrate JSON")
+    p3.add_argument("--out", required=True, help="output path for entrypoints.json")
+    p3.set_defaults(func=_step2)
+
     args = parser.parse_args(argv)
     return args.func(args)
+
+
+def _step2(args: argparse.Namespace) -> int:
+    substrate_path = Path(args.substrate)
+    if not substrate_path.is_file():
+        print(f"error: --substrate not found: {substrate_path}", file=sys.stderr)
+        return 2
+    substrate = json.loads(substrate_path.read_text())
+    output, report = step2_runner.run(substrate)
+    out_path = Path(args.out)
+    step2_runner.write_entrypoints(output, out_path)
+    print(
+        f"step2: project={report.project!r} cve={report.cve!r}"
+        f" slice={report.slice_counts}"
+        f" proposed={report.candidates_proposed}"
+        f" kept={report.kept} quarantined={report.quarantined}"
+        f" elapsed={report.elapsed_sec:.1f}s -> {out_path}"
+    )
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
