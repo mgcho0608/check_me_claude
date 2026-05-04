@@ -306,6 +306,161 @@ def test_function_with_multiple_attributes_picks_constructor(tmp_path):
     assert ctor[0]["callback_function"] == "early"
 
 
+# ---------------- struct_initializer ----------------
+
+
+def test_global_struct_with_function_pointer_field_emits_struct_initializer(tmp_path):
+    """The vtable-registration idiom: a global struct whose fields
+    are initialised with named functions. Captures Linux-kernel
+    ``struct file_operations``, contiki PROCESS expansion, etc."""
+    rows = _cb(
+        tmp_path,
+        """
+        struct ops { int (*open)(void); int (*close)(void); };
+        int my_open(void){return 0;}
+        int my_close(void){return 0;}
+        struct ops vtbl = { my_open, my_close };
+        """,
+    )
+    si = sorted(
+        (r for r in rows if r["kind"] == "struct_initializer"),
+        key=lambda r: r["callback_function"],
+    )
+    assert {r["callback_function"] for r in si} == {"my_close", "my_open"}
+    for r in si:
+        assert r["registration_site"] == "vtbl{}"
+
+
+def test_designated_struct_initializer_with_fp_field(tmp_path):
+    """Designated initialiser ``.field = fn``."""
+    rows = _cb(
+        tmp_path,
+        """
+        struct ops { int (*open)(void); int (*close)(void); };
+        int my_open(void){return 0;}
+        int my_close(void){return 0;}
+        struct ops vtbl = { .open = my_open, .close = my_close };
+        """,
+    )
+    si = {r["callback_function"] for r in rows if r["kind"] == "struct_initializer"}
+    assert si == {"my_open", "my_close"}
+
+
+def test_array_of_struct_with_fp_fields_emits_struct_initializer(tmp_path):
+    """The nginx ``ngx_command_t cmds[]`` pattern: array whose
+    elements are structs with function-pointer fields. Each fn
+    reference should be recorded as ``struct_initializer`` (the
+    outer is array but elements are records)."""
+    rows = _cb(
+        tmp_path,
+        """
+        struct cmd { const char *name; int (*set)(int); };
+        int set_a(int x){return x;}
+        int set_b(int x){return x;}
+        struct cmd cmds[] = {
+            { "a", set_a },
+            { "b", set_b },
+        };
+        """,
+    )
+    si = {r["callback_function"] for r in rows if r["kind"] == "struct_initializer"}
+    assert si == {"set_a", "set_b"}
+
+
+def test_struct_with_no_fp_fields_emits_no_struct_initializer(tmp_path):
+    rows = _cb(
+        tmp_path,
+        """
+        struct cfg { int port; const char *name; };
+        struct cfg c = { 80, "hi" };
+        """,
+    )
+    assert [r for r in rows if r["kind"] == "struct_initializer"] == []
+
+
+# ---------------- callback_argument ----------------
+
+
+def test_pthread_create_emits_callback_argument(tmp_path):
+    """Generic POSIX shape: any function passed as a CallExpr
+    argument is a registration. Captures pthread_create / atexit /
+    qsort / project-internal helpers uniformly."""
+    rows = _cb(
+        tmp_path,
+        """
+        typedef unsigned long pthread_t;
+        typedef struct { int _; } pthread_attr_t;
+        int pthread_create(pthread_t *, const pthread_attr_t *,
+                           void *(*)(void *), void *);
+
+        void *worker(void *arg){(void)arg; return 0;}
+        void start(pthread_t *t){ pthread_create(t, 0, worker, 0); }
+        """,
+    )
+    ca = [r for r in rows if r["kind"] == "callback_argument"]
+    assert any(r["callback_function"] == "worker" for r in ca)
+    assert any("pthread_create" in r["registration_site"] for r in ca)
+
+
+def test_atexit_emits_callback_argument(tmp_path):
+    rows = _cb(
+        tmp_path,
+        """
+        int atexit(void (*)(void));
+        void cleanup(void){}
+        void install(void){ atexit(cleanup); }
+        """,
+    )
+    ca = [r for r in rows if r["kind"] == "callback_argument"]
+    assert {r["callback_function"] for r in ca} == {"cleanup"}
+
+
+def test_signal_does_not_emit_callback_argument(tmp_path):
+    """Signal API is more-specifically covered by signal_handler;
+    callback_argument must skip signal/bsd_signal/sysv_signal to
+    avoid duplicating the same registration under two kinds."""
+    rows = _cb(
+        tmp_path,
+        """
+        typedef void (*sighandler_t)(int);
+        sighandler_t signal(int, sighandler_t);
+        void on_sig(int s){(void)s;}
+        void install(void){ signal(2, on_sig); }
+        """,
+    )
+    by_fn = {(r["callback_function"], r["kind"]) for r in rows}
+    assert ("on_sig", "signal_handler") in by_fn
+    assert ("on_sig", "callback_argument") not in by_fn
+
+
+def test_call_with_no_function_argument_emits_nothing(tmp_path):
+    rows = _cb(
+        tmp_path,
+        """
+        int compute(int x){return x*2;}
+        void caller(void){ (void)compute(5); }
+        """,
+    )
+    assert [r for r in rows if r["kind"] == "callback_argument"] == []
+
+
+def test_project_internal_register_helper_is_caught(tmp_path):
+    """An internal ``register_handler(my_fn)`` looks structurally
+    identical to POSIX ``atexit(fn)`` and should be captured the
+    same way — no allow-list of API names is hardcoded."""
+    rows = _cb(
+        tmp_path,
+        """
+        typedef int (*handler_t)(int);
+        void register_handler(handler_t);
+        int my_handler(int x){return x;}
+        void install(void){ register_handler(my_handler); }
+        """,
+    )
+    ca = [r for r in rows if r["kind"] == "callback_argument"]
+    assert {r["callback_function"] for r in ca} == {"my_handler"}
+
+
 # ---------------- structural / cross-mechanism ----------------
 
 

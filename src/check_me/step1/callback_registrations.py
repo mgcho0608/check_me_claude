@@ -1,16 +1,15 @@
 """Callback-registration extraction.
 
-Four distinct registration mechanisms are detected, each populating
+Six distinct registration mechanisms are detected, each populating
 the schema's ``kind`` enum:
 
 1. ``function_table`` — a static array initialized with a list of
-   function names (e.g. libssh's ``default_packet_handlers[]`` or
-   contiki-ng's PROCESS callback array). Each function-reference
-   slot in the initializer becomes one row.
+   function names (e.g. a packet-handler dispatch table). Each
+   function-reference slot in the initializer becomes one row.
 
 2. ``function_pointer_assignment`` — an assignment whose left-hand
    side is a writable expression of function-pointer type and whose
-   right-hand side names a function (e.g. libssh's
+   right-hand side names a function (e.g.
    ``session->socket_callbacks.data = ssh_packet_socket_callback``).
 
 3. ``signal_handler`` — a call to ``signal`` (POSIX) or
@@ -23,6 +22,28 @@ the schema's ``kind`` enum:
 4. ``constructor`` — a FunctionDecl whose attributes include
    ``constructor`` or ``destructor`` (GCC / clang
    ``__attribute__``).
+
+5. ``struct_initializer`` — a global / static ``VarDecl`` of struct
+   (or union, or array-of-struct) type whose initializer contains a
+   function-decl reference in one of its fields. This is the C
+   vtable-registration idiom: ``struct file_operations fops = {
+   .read = my_read, .write = my_write };`` (Linux kernel),
+   ``struct ngx_command_t cmds[] = { { ..., my_set_handler, ... } };``
+   (nginx), ``struct process p = { NULL, "name", thread_fn };``
+   (Contiki PROCESS macro expansion). Captured by AST shape, never
+   by macro name.
+
+6. ``callback_argument`` — a function passed as an argument to
+   another function call. Every C standard / POSIX function that
+   takes a function pointer as a parameter falls under this — the
+   callee will (synchronously or asynchronously) invoke the passed
+   function, so the call site IS the registration.
+   ``pthread_create(..., start_fn, ...)``, ``atexit(cleanup_fn)``,
+   ``qsort(..., cmp_fn)``, ``ftw(path, walker_fn, ...)``, project-
+   specific helpers like ``register_event_handler(my_handler)``
+   are all caught by the same shape (any CallExpr arg that resolves
+   to a FunctionDecl). Signal API calls are excluded — they are
+   already a more-specific kind 3.
 
 Per ``schemas/substrate.v1.json`` each row carries:
 
@@ -320,6 +341,161 @@ def _walk_signal_handlers(
 
 
 # --------------------------------------------------------------------------- #
+# Mechanism 5: struct / union / array-of-struct initializers with fp fields
+# --------------------------------------------------------------------------- #
+
+
+def _outer_init_admits_struct_walk(t: cx.Type) -> bool:
+    """True if a top-level VarDecl of type ``t`` should be walked for
+    function-pointer fields. Walks structs, unions, and arrays whose
+    element type is a struct/union (the array-of-struct vtable
+    pattern). Plain arrays of function pointers are handled by
+    mechanism 1 — we exclude them here to avoid duplicate rows."""
+    canon = t.get_canonical()
+    if canon.kind in (cx.TypeKind.RECORD,):
+        return True
+    if canon.kind == cx.TypeKind.CONSTANTARRAY:
+        elem = canon.get_array_element_type().get_canonical()
+        return elem.kind == cx.TypeKind.RECORD
+    return False
+
+
+def _walk_init_for_function_refs(
+    node: cx.Cursor,
+) -> Iterable[cx.Cursor]:
+    """Recursively yield DECL_REF_EXPR cursors that resolve to a
+    FunctionDecl, found anywhere inside ``node``'s subtree.
+
+    Designated initialisers in libclang's AST take the shape
+    ``INIT_LIST_EXPR -> UNEXPOSED_EXPR -> [MEMBER_REF, UNEXPOSED_EXPR
+    -> DECL_REF_EXPR]`` — i.e. the designator and the value are
+    siblings under an unexposed wrapper. A naive "follow the first
+    child" unwrap therefore misses the value side. We walk *all*
+    children recursively, stopping descent at CALL_EXPR /
+    BINARY_OPERATOR so we don't pick up function references that
+    appear inside expressions which *use* a function rather than
+    *register* it (a constant initialised via ``f() + 1`` would
+    otherwise mis-register ``f``)."""
+    if node is None:
+        return
+    if node.kind == cx.CursorKind.DECL_REF_EXPR:
+        ref = node.referenced
+        if ref is not None and ref.kind == cx.CursorKind.FUNCTION_DECL:
+            yield node
+        return
+    if node.kind in (
+        cx.CursorKind.CALL_EXPR,
+        cx.CursorKind.BINARY_OPERATOR,
+    ):
+        return
+    for kid in node.get_children():
+        yield from _walk_init_for_function_refs(kid)
+
+
+def _extract_struct_initializers(
+    parsed: ParseResult, project_root_str: str
+) -> list[CallbackReg]:
+    out: list[CallbackReg] = []
+    for top in parsed.tu.cursor.get_children():
+        if top.kind != cx.CursorKind.VAR_DECL:
+            continue
+        ok, rel = in_project_location(top.location, project_root_str)
+        if not ok:
+            continue
+        if not _outer_init_admits_struct_walk(top.type):
+            continue
+        # Find the InitListExpr child. Skip if absent (e.g. extern
+        # decls without initializer).
+        init_list = None
+        for kid in top.get_children():
+            if kid.kind == cx.CursorKind.INIT_LIST_EXPR:
+                init_list = kid
+                break
+        if init_list is None:
+            continue
+        var_name = top.spelling or "<anonymous>"
+        seen_lines: set[tuple[int, str]] = set()
+        for ref_cursor in _walk_init_for_function_refs(init_list):
+            ref = ref_cursor.referenced
+            if ref is None or ref.kind != cx.CursorKind.FUNCTION_DECL:
+                continue
+            fn_name = ref.spelling
+            line = ref_cursor.location.line
+            key = (line, fn_name)
+            if key in seen_lines:
+                continue
+            seen_lines.add(key)
+            out.append(
+                CallbackReg(
+                    registration_site=f"{var_name}{{}}",
+                    callback_function=fn_name,
+                    file=rel,  # type: ignore[arg-type]
+                    line=line,
+                    kind="struct_initializer",
+                    note=f"function-pointer field of {var_name}",
+                )
+            )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Mechanism 6: function-as-argument in a call (POSIX-style registration)
+# --------------------------------------------------------------------------- #
+
+
+def _walk_callback_arguments(
+    fn: cx.Cursor, rel_path: str
+) -> list[CallbackReg]:
+    """Emit one row per function-decl reference that appears as an
+    argument to a CallExpr. Generic — fires on any standard /
+    POSIX function that takes a function-pointer parameter
+    (``pthread_create``, ``atexit``, ``qsort``, ``bsearch``,
+    ``ftw``, ``nftw``, ``pthread_atfork``, ``pthread_cleanup_push``)
+    and on any project-internal registration helper of the same
+    shape (``register_handler(my_fn)``,
+    ``schedule_callback(cb, arg)``, ...). The signal API names are
+    skipped because they are already covered by the more-specific
+    ``signal_handler`` mechanism."""
+    out: list[CallbackReg] = []
+    body_file = fn.extent.start.file.name if fn.extent.start.file else None
+    for cur in fn.walk_preorder():
+        if cur.kind != cx.CursorKind.CALL_EXPR:
+            continue
+        if cur.location.file is None or cur.location.file.name != body_file:
+            continue
+        kids = list(cur.get_children())
+        if not kids:
+            continue
+        # First child is the callee expression; remaining are args.
+        callee_ref = cur.referenced
+        callee_name = (
+            callee_ref.spelling
+            if callee_ref is not None
+            and callee_ref.kind == cx.CursorKind.FUNCTION_DECL
+            else "<callee>"
+        )
+        # Skip APIs already handled by mechanism 3 to avoid noisy
+        # duplication of the same registration under two kinds.
+        if callee_name in _SIGNAL_APIS:
+            continue
+        for arg_idx, arg in enumerate(kids[1:]):
+            fn_name = _resolved_function(arg)
+            if fn_name is None:
+                continue
+            out.append(
+                CallbackReg(
+                    registration_site=f"{callee_name}() arg {arg_idx}",
+                    callback_function=fn_name,
+                    file=rel_path,
+                    line=cur.location.line,
+                    kind="callback_argument",
+                    note=f"passed to {callee_name} in {function_name(fn)}",
+                )
+            )
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Mechanism 4: constructor / destructor attributes
 # --------------------------------------------------------------------------- #
 
@@ -401,11 +577,13 @@ def extract_callback_regs_from_tu(
     project_root_abs = str(project_root.resolve())
     out: list[CallbackReg] = []
     out.extend(_extract_function_tables(parsed, project_root_abs))
+    out.extend(_extract_struct_initializers(parsed, project_root_abs))
     out.extend(_extract_constructor_attrs(parsed, project_root_abs))
     for fn, rel in iter_function_defs(parsed.tu, project_root_abs):
         assert rel is not None
         out.extend(_walk_assignments_for_fn_ptr(fn, rel))
         out.extend(_walk_signal_handlers(fn, rel))
+        out.extend(_walk_callback_arguments(fn, rel))
     return out
 
 

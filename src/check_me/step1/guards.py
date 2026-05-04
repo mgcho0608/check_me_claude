@@ -1,26 +1,36 @@
 """Guard / enforcement-relation extraction.
 
-A *guard* in the substrate is an ``if`` (or equivalent) whose taken
-branch terminates the current execution path — by ``return``, by
-``goto`` to an explicit error / cleanup label, or by ``break`` /
-``continue`` out of an enclosing loop. Such a construct gates the
-fall-through code against the predicate.
+A *guard* in the substrate is a control-flow construct whose taken
+branch decides which code path runs based on a predicate or value.
+The substrate captures two structurally distinct shapes:
 
-Detected forms (extend later as needed):
+A) ``if`` (or equivalent) whose taken branch terminates the current
+   execution path — by ``return``, by ``goto`` to an explicit error
+   / cleanup label, or by ``break`` / ``continue`` out of an
+   enclosing loop. The condition gates fall-through code against
+   the predicate.
 
-1. ``if (cond) return ...;``
-2. ``if (cond) goto label;``
-3. ``if (cond) break;`` / ``if (cond) continue;``
-4. ``if (cond) { return ...; }`` — single-statement compound.
-5. ``if (cond) { goto label; }``
-6. ``if (cond) { break; }`` / ``if (cond) { continue; }``
+   1. ``if (cond) return ...;``
+   2. ``if (cond) goto label;``
+   3. ``if (cond) break;`` / ``if (cond) continue;``
+   4. ``if (cond) { return ...; }`` — single-statement compound.
+   5. ``if (cond) { goto label; }``
+   6. ``if (cond) { break; }`` / ``if (cond) { continue; }``
+
+B) ``switch (expr)`` — a value-driven dispatch. Each ``case`` is a
+   guard against a specific value; default is the catch-all. We
+   emit ONE row per ``switch`` (with the dispatched expression as
+   ``guard_call``), not per case, because the structural fact "this
+   function has a switch on ``expr`` here" is what downstream
+   reasoning needs. Per-case bodies are recoverable from the source
+   lookup at ``(file, guard_line)``. Switch-on-attacker-byte is the
+   canonical packet-dispatcher / syscall-table / event-type
+   fan-out shape, generic across protocol parsers and event loops.
 
 Forms NOT yet detected (deferred):
 
 - ``while (cond) { ... }`` — captured as a loop in
   ``data_control_flow``, not a guard.
-- ``case L: ... break;`` — switch arms; some are guards, but
-  classifying them robustly needs more case-by-case reasoning.
 - Patterns like ``rc = call(); if (rc) goto err;`` — the call's
   return is checked through a temporary variable. The condition
   IS picked up (the IfStmt above), but the ``call`` itself is in
@@ -152,6 +162,48 @@ def _walk_if_stmts(
 
 
 # --------------------------------------------------------------------------- #
+# SwitchStmt walker
+# --------------------------------------------------------------------------- #
+
+
+def _walk_switch_stmts(
+    fn: cx.Cursor, fn_name: str, rel_path: str
+) -> list[GuardEntry]:
+    """Emit one guard row per ``switch (expr)`` in the function.
+
+    The switch expression becomes ``guard_call`` (e.g.
+    ``"switch (msg->type)"``) and the line of the switch keyword
+    becomes ``guard_line``. ``enforcement_line`` is left unset
+    because a switch has many candidate enforcement points (one
+    per case body); recovering them is downstream Step 3 work.
+    """
+    out: list[GuardEntry] = []
+    body_file = fn.extent.start.file.name if fn.extent.start.file else None
+    for cur in fn.walk_preorder():
+        if cur.kind != cx.CursorKind.SWITCH_STMT:
+            continue
+        loc = cur.location
+        if loc.file is None or loc.file.name != body_file:
+            continue
+        kids = list(cur.get_children())
+        if not kids:
+            continue
+        cond = kids[0]
+        cond_text = written_form(cond) or "<unknown>"
+        out.append(
+            GuardEntry(
+                function=fn_name,
+                file=rel_path,
+                guard_call=f"switch ({cond_text})",
+                guard_line=loc.line,
+                result_used=True,
+                note="switch dispatch",
+            )
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
 
@@ -163,7 +215,9 @@ def extract_guards_from_tu(
     out: list[GuardEntry] = []
     for fn, rel in iter_function_defs(parsed.tu, project_root_abs):
         assert rel is not None
-        out.extend(_walk_if_stmts(fn, function_name(fn), rel))
+        fn_name = function_name(fn)
+        out.extend(_walk_if_stmts(fn, fn_name, rel))
+        out.extend(_walk_switch_stmts(fn, fn_name, rel))
     return out
 
 

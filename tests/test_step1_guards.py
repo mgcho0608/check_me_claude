@@ -262,7 +262,12 @@ def test_while_loop_alone_is_not_a_guard(tmp_path):
     assert g == []
 
 
-def test_switch_alone_is_not_a_guard(tmp_path):
+def test_switch_emits_one_guard_row_with_switch_call_in_guard_call(tmp_path):
+    """A ``switch (expr)`` is a value-driven dispatch — generic across
+    protocol parsers, syscall tables, and event loops. We capture
+    one row per switch (the structural fact that this function
+    dispatches on ``expr`` here); per-case bodies are downstream
+    work."""
     g = _guards(
         tmp_path,
         """
@@ -276,7 +281,12 @@ def test_switch_alone_is_not_a_guard(tmp_path):
         }
         """,
     )
-    assert g == []
+    assert len(g) == 1, g
+    row = g[0]
+    assert row["function"] == "f"
+    assert row["guard_call"].startswith("switch (")
+    assert "x" in row["guard_call"]
+    assert row["result_used"] is True
 
 
 def test_compound_then_without_final_terminator_is_not_a_guard(tmp_path):

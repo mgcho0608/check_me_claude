@@ -72,6 +72,8 @@
 라벨이 단지 "extractor와 매칭 잘 되게" 보이는 enum으로 force-fit되어 있지 않은지 직접 다시 확인. 점수 inflate가 잘못된 라벨보다 더 나쁘다. 이미 잡은 stretch 패턴들 (corpus가 자라며 추가):
 
 - [ ] `kind: "function_table"` 은 **static array of function names** 만. main-loop 직접 호출이나 protothread/event-dispatch 매크로는 **function table 아님** → `unknown` + free-text.
+- [ ] `kind: "struct_initializer"` (callback_registrations) 은 **global / static struct(또는 array-of-struct, union)의 초기화 시점에 함수 포인터 필드가 함수 이름으로 초기화되는 경우** 만 (Linux `struct file_operations`, contiki `PROCESS()` 매크로 산물 `struct process`, nginx `ngx_command_t cmds[]` 식). 함수 본문 안 대입은 `function_pointer_assignment`, 함수 포인터만 들어간 평면 배열은 `function_table` — 헷갈리면 enum 골라 force-fit하지 말고 `unknown` + free-text.
+- [ ] `kind: "callback_argument"` (callback_registrations) 은 **다른 함수 호출의 인자로 함수 이름이 전달된 경우** 만 (`pthread_create(..., fn, ...)`, `atexit(fn)`, `qsort(..., cmp)`, 프로젝트 내부 `register_handler(fn)`). 호출되는 callee 자체는 `call_graph`로 이미 기록됨 — 거기 중복 기재 금지. `signal()`/`bsd_signal()`/`sysv_signal()` 인자는 더 구체적인 `signal_handler` 쪽으로 — `callback_argument`로 적지 말 것.
 - [ ] `kind: "compile_flag"` 은 **`-D<NAME>` 빌드 플래그** 만 (line: 0 관습). `#if` 블록 안 일반 C 라인은 `compile_flag` 행이 아님 → directive 라인을 `kind: "ifdef"` 로 기록.
 - [ ] `kind: "cli_argument"` 은 **CLI 파서 사이트** (예: `getopt` switch case) 만. CLI-gated 동작이 *발현되는* 라인은 cli_argument 행 아님 → `unknown` + free-text.
 - [ ] `kind: "structural_artifact"` (evidence_anchors) 은 **top-level 구조적 사실** 만 (struct / typedef / enum / global / alias 매크로). 함수 본문 안 statement 라인은 `data_control_flow` 의 def_use / branch / loop 가 다룸 — evidence_anchors에 중복 기재 금지.

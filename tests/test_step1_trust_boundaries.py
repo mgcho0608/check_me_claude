@@ -305,6 +305,104 @@ def test_scanf_marks_function_as_external_input(tmp_path):
     ), rows
 
 
+# ---------- main(argv) — CLI input ----------
+
+
+def test_main_with_argv_emits_external_io_trust_boundary(tmp_path):
+    """``int main(int argc, char *argv[])`` is the C-standard CLI
+    entry; argv is attacker-controlled. Captured generically by
+    name + parameter count, no project-specific check."""
+    rows = _tb(
+        tmp_path,
+        """
+        int main(int argc, char *argv[]) { (void)argc; (void)argv; return 0; }
+        """,
+    )
+    main_rows = [r for r in rows if r["function"] == "main"]
+    assert any(
+        r["kind"] == "external_io"
+        and r["direction"] == "untrusted_to_trusted"
+        and "argv of main()" in r.get("note", "")
+        for r in main_rows
+    ), main_rows
+
+
+def test_main_without_argv_does_not_emit_argv_row(tmp_path):
+    rows = _tb(
+        tmp_path,
+        """
+        int main(void) { return 0; }
+        """,
+    )
+    assert all("argv of main()" not in r.get("note", "") for r in rows)
+
+
+def test_non_main_function_with_two_args_is_not_argv_row(tmp_path):
+    rows = _tb(
+        tmp_path,
+        """
+        int handler(int code, char *msg) { (void)code; (void)msg; return 0; }
+        """,
+    )
+    assert rows == []
+
+
+# ---------- POSIX additions (B2 audit) ----------
+
+
+def test_popen_marks_function_as_ipc_input(tmp_path):
+    rows = _tb(
+        tmp_path,
+        """
+        #include <stdio.h>
+        int run(void) {
+            FILE *f = popen("cat", "r");
+            (void)f; return 0;
+        }
+        """,
+    )
+    assert any(
+        r["function"] == "run"
+        and r["kind"] == "ipc_endpoint"
+        and r["direction"] == "untrusted_to_trusted"
+        for r in rows
+    ), rows
+
+
+def test_mmap_marks_function_as_file_read_unknown_direction(tmp_path):
+    rows = _tb(
+        tmp_path,
+        """
+        #include <sys/mman.h>
+        void *map(int fd, unsigned long n) {
+            return mmap(0, n, 1, 1, fd, 0);
+        }
+        """,
+    )
+    assert any(
+        r["function"] == "map"
+        and r["kind"] == "file_read"
+        and r["direction"] == "unknown"
+        for r in rows
+    ), rows
+
+
+def test_socketpair_marks_function_as_ipc_endpoint(tmp_path):
+    """``socketpair`` creates a Unix-domain socket pair — POSIX
+    classifies it under inter-process communication."""
+    rows = _tb(
+        tmp_path,
+        """
+        #include <sys/socket.h>
+        int pair(int sv[2]) { return socketpair(1, 1, 0, sv); }
+        """,
+    )
+    assert any(
+        r["function"] == "pair" and r["kind"] == "ipc_endpoint"
+        for r in rows
+    ), rows
+
+
 # ---------- negative cases ----------
 
 

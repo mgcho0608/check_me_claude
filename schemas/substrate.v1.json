@@ -105,7 +105,7 @@
               "callback_function": {"type": "string"},
               "file": {"type": "string"},
               "line": {"type": ["integer", "null"]},
-              "kind": {"enum": ["function_pointer_assignment", "signal_handler", "constructor", "function_table", "unknown"]},
+              "kind": {"enum": ["function_pointer_assignment", "signal_handler", "constructor", "function_table", "struct_initializer", "callback_argument", "unknown"]},
               "note": {"type": "string"}
             }
           }

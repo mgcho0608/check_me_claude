@@ -85,21 +85,32 @@ _FILE_OPEN = {
 
 _IPC_INPUT = {
     "mq_receive", "msgrcv", "shm_open",
+    "popen",  # opens a process with bidirectional pipe; reading from
+              # the resulting FILE* yields untrusted bytes.
 }
 _IPC_OUTPUT = {
     "mq_send", "msgsnd",
 }
 _IPC_SETUP = {
     "pipe", "pipe2",
+    "socketpair",  # POSIX, creates a connected socket pair.
+    "mkfifo", "mkfifoat",  # POSIX named pipe creation.
 }
 
 _EXTERNAL_INPUT = {
     "getenv", "secure_getenv",
+    "getlogin", "getlogin_r",  # POSIX, login-name strings from env.
+    "getpass",  # SUSv2, prompted password input.
     "scanf", "fscanf", "sscanf", "vscanf", "vfscanf", "vsscanf",
 }
 _EXTERNAL_GENERIC = {
     "ioctl", "fcntl",
 }
+
+# mmap can map a file or device whose contents are attacker-influenced;
+# treat as file_read with unknown direction (the kind of access depends
+# on the prot flags, which we don't analyse statically).
+_FILE_OPEN_MMAP = {"mmap", "mmap64"}
 
 # (kind, direction) per API.
 API_TABLE: dict[str, tuple[str, str]] = {}
@@ -125,6 +136,8 @@ for n in _EXTERNAL_INPUT:
     API_TABLE[n] = ("external_io", "untrusted_to_trusted")
 for n in _EXTERNAL_GENERIC:
     API_TABLE[n] = ("external_io", "unknown")
+for n in _FILE_OPEN_MMAP:
+    API_TABLE[n] = ("file_read", "unknown")
 
 
 # --------------------------------------------------------------------------- #
@@ -180,6 +193,19 @@ def _api_calls_in_function(fn: cx.Cursor) -> dict[tuple[str, str], list[tuple[st
     return out
 
 
+def _is_main_with_argv(fn: cx.Cursor) -> bool:
+    """C standard ``int main(int argc, char *argv[])`` — argv is the
+    canonical command-line attacker-controlled input. Project-
+    agnostic: any C program's main() with a second parameter is the
+    CLI entry. We only require the name and >= 2 parameters; we do
+    not enforce the exact ``char **`` type because some projects
+    declare it ``const char * const argv[]`` and we want both."""
+    if (fn.spelling or "") != "main":
+        return False
+    params = list(fn.get_arguments())
+    return len(params) >= 2
+
+
 def extract_trust_boundaries_from_tu(
     parsed: ParseResult, project_root: Path
 ) -> list[TrustBoundary]:
@@ -187,13 +213,11 @@ def extract_trust_boundaries_from_tu(
     out: list[TrustBoundary] = []
     for fn, rel in iter_function_defs(parsed.tu, project_root_abs):
         assert rel is not None
-        api_hits = _api_calls_in_function(fn)
-        if not api_hits:
-            continue
         fn_name = function_name(fn)
         fn_line = fn.location.line
+
+        api_hits = _api_calls_in_function(fn)
         for (kind, direction), hits in api_hits.items():
-            # Build a compact note listing up to the first 3 API hits.
             sample = ", ".join(f"{a}@L{ln}" for a, ln in hits[:3])
             extra = "" if len(hits) <= 3 else f" (+{len(hits) - 3} more)"
             note = f"via {sample}{extra}"
@@ -205,6 +229,18 @@ def extract_trust_boundaries_from_tu(
                     line=fn_line,
                     direction=direction,
                     note=note,
+                )
+            )
+
+        if _is_main_with_argv(fn):
+            out.append(
+                TrustBoundary(
+                    kind="external_io",
+                    function=fn_name,
+                    file=rel,
+                    line=fn_line,
+                    direction="untrusted_to_trusted",
+                    note="argv of main() — command-line input is attacker-controlled",
                 )
             )
     return out
