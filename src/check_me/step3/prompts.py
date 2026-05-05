@@ -74,6 +74,21 @@ PART A — Path nodes.
   intermediate line that dispatches and one sink line that
   writes auth state).
 
+  IMPORTANT — depth of the sink node. If the source-code excerpts
+  in your input contain the body of a callee whose internals
+  perform the actual harmful operation (e.g. the call site shows
+  ``if (add_resource_record(...))`` and the excerpt for
+  ``add_resource_record`` shows its body with the unbounded
+  pointer write), put the sink node at the *callee's harmful line*
+  inside the callee's file, NOT at the caller's call line. The
+  call line is at most an ``intermediate`` node; the harmful line
+  inside the called function (its actual write / OOB index /
+  command exec / state-corruption assignment) is the ``sink``.
+  Add the callee as its own node in your path with the right
+  file and line. Going one node deeper is correct when its body
+  is in your input; staying at the caller's line is conservative
+  and loses precision.
+
 PART B — Path edges.
 
   Edges connect the nodes you listed. Each edge has from / to
