@@ -84,22 +84,34 @@ PART A — Path nodes.
                             registered handler table — that line
                             is a *dispatch boundary*, not a sink).
 
-  Boundary handling. If your retrieval neighborhood cannot reach
-  a real sink (the chain's terminal harmful operation lives more
-  than 2 hops away, or behind an indirect dispatch this IR
-  cannot resolve), DO NOT promote the last reachable node to
-  ``sink``. Instead:
+  Two cases — read carefully:
 
-    1. Keep that node's ``role`` as ``intermediate`` (or
-       ``guard`` when applicable),
-    2. In ``uncertainty``, explicitly state that the chain
-       continues beyond this IR's visible neighborhood and name
-       the next entrypoint(s) the chain could plausibly thread
-       through — typically a function in
-       ``callback_registrations`` or a function the indirect
-       dispatch resolves into. This signal lets the downstream
-       Step 4 weave this IR with a sibling IR rooted at that
-       continuation point.
+    Case 1 (the harmful operation IS visible in your source
+    excerpts). Label that node ``sink``. Do not punt a real,
+    observed sink to "another IR"; if you can see the line that
+    writes the corrupted state, frees the dangling pointer,
+    indexes out-of-bounds, executes the unchecked command, etc.,
+    call it a sink. The whole point of this IR is to surface
+    such observations.
+
+    Case 2 (your retrieval neighborhood ends at a boundary that
+    does NOT itself contain a harmful operation — typically an
+    indirect-callback dispatch site whose target is decided by a
+    registered handler table this IR cannot resolve, or the chain
+    plausibly continues more than 2 hops away). For that case,
+    keep the last reachable node's ``role`` as ``intermediate``
+    (or ``guard`` when applicable) and in ``uncertainty``
+    explicitly state that the chain continues beyond this IR's
+    visible neighborhood, naming the next entrypoint(s) the
+    chain could plausibly thread through — typically a function
+    in ``callback_registrations`` or a function the indirect
+    dispatch resolves into. This signal lets Step 4 weave this
+    IR with a sibling IR rooted at that continuation point.
+
+  Concretely: if the source-code excerpts in your input contain
+  the harmful operation's text, it goes in this IR as a ``sink``.
+  Only when the chain's harmful operation lives outside the
+  excerpts you can see should you fall back to Case 2.
 
   Multiple lines of the same function may appear as separate
   nodes when distinct lines play distinct roles (e.g. one
