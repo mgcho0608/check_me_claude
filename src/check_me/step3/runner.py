@@ -39,7 +39,7 @@ from ..llm.client import ChatRequest, ChatResponse, chat, make_client
 from ..llm.config import Config, StepKind, load_config
 from . import synth as synth_mod
 from .code_excerpt import extract_excerpts
-from .retrieval import compute_neighborhood
+from .retrieval import DEFAULT_HOP_DEPTH, compute_neighborhood
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,8 @@ def run(
     max_workers: int = 1,
     synth_retry_passes: int = 2,
     synth_retry_cooldown_sec: float = 60.0,
+    enable_escalation: bool = True,
+    escalation_hop_depth: int = DEFAULT_HOP_DEPTH + 1,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> tuple[dict[str, Any], Step3Report]:
     """Run Step 3 end-to-end on a single dataset's outputs.
@@ -117,6 +119,16 @@ def run(
     Returns ``(evidence_irs_json, report)``. Writes the output to
     ``out_path`` if supplied. The shape matches
     ``schemas/evidence_irs.v1.json``.
+
+    Escalation (PLAN §3 Retrieval policy "N=2 + escalation"):
+    when a per-IR LLM response sets ``needs_more_context: true``,
+    the runner recomputes the neighborhood at
+    ``escalation_hop_depth`` (default 3) and re-issues the
+    synthesis call with the deeper input. The deeper IR replaces
+    the original. ``enable_escalation=False`` reverts to a fixed
+    N=2 retrieval (no recompute, no re-call) for budget-
+    constrained runs. The signalling field itself is stripped
+    from the persisted IR.
     """
     start = time.monotonic()
 
@@ -142,33 +154,98 @@ def run(
     if client is None:
         client = make_client(config)
 
+    def _attempt_at_depth(
+        ep: dict[str, Any], hop_depth: int,
+    ) -> tuple[dict[str, Any], int, int, int, int]:
+        """Compute neighborhood at ``hop_depth``, extract
+        excerpts, call synthesis. Returns
+        (parsed_ir, nbhd_nodes, nbhd_edges, excerpts, attempts).
+        Raises on transport / schema failure — caller handles."""
+        nbhd = compute_neighborhood(
+            substrate,
+            entry_function=ep.get("function", ""),
+            entry_file=ep.get("file", ""),
+            entry_line=ep.get("line"),
+            hop_depth=hop_depth,
+        )
+        targets = [(n.file, n.function) for n in nbhd.nodes if n.file]
+        excerpts = extract_excerpts(source_root, targets)
+        result = synth_mod.synthesise_ir(
+            client=client, config=config,
+            entrypoint=ep, neighborhood=nbhd, excerpts=excerpts,
+            project=project, cve=cve,
+            chat_fn=chat_fn,
+        )
+        return (
+            result.parsed,
+            len(nbhd.nodes), len(nbhd.edges), len(excerpts),
+            result.attempts,
+        )
+
     def _synthesise_one(idx: int, ep: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, Any]]:
-        """Compute neighborhood, extract excerpts, call synthesis.
-        Returns (idx, ir_dict, info). On exception ``info.ok`` is
-        False and ir_dict is the synthetic placeholder."""
+        """Compute neighborhood, extract excerpts, call synthesis,
+        and (when ``enable_escalation``) re-call at deeper hops if
+        the LLM sets ``needs_more_context: true``. Returns
+        (idx, ir_dict, info). On exception ``info.ok`` is False
+        and ir_dict is the synthetic placeholder."""
         try:
-            nbhd = compute_neighborhood(
-                substrate,
-                entry_function=ep.get("function", ""),
-                entry_file=ep.get("file", ""),
-                entry_line=ep.get("line"),
+            ir_parsed, n_nodes, n_edges, n_excerpts, attempts = _attempt_at_depth(
+                ep, hop_depth=DEFAULT_HOP_DEPTH,
             )
-            targets = [(n.file, n.function) for n in nbhd.nodes if n.file]
-            excerpts = extract_excerpts(source_root, targets)
-            result = synth_mod.synthesise_ir(
-                client=client, config=config,
-                entrypoint=ep, neighborhood=nbhd, excerpts=excerpts,
-                project=project, cve=cve,
-                chat_fn=chat_fn,
-            )
-            return idx, result.parsed, {
+            info: dict[str, Any] = {
                 "ok": True,
                 "candidate_id": ep.get("id"),
-                "neighborhood_nodes": len(nbhd.nodes),
-                "neighborhood_edges": len(nbhd.edges),
-                "excerpts": len(excerpts),
-                "attempts": result.attempts,
+                "neighborhood_nodes": n_nodes,
+                "neighborhood_edges": n_edges,
+                "excerpts": n_excerpts,
+                "attempts": attempts,
+                "hop_depth": DEFAULT_HOP_DEPTH,
             }
+            # Escalation — recompute at deeper hops + re-call when
+            # the LLM signals insufficient context. We do this once
+            # per IR (escalation depth is single-step from N=2 to
+            # configured ``escalation_hop_depth`` — usually 3) so
+            # an unconditional flag-loop cannot infinitely consume
+            # budget.
+            if (
+                enable_escalation
+                and bool(ir_parsed.get("needs_more_context"))
+                and escalation_hop_depth > DEFAULT_HOP_DEPTH
+            ):
+                logger.info(
+                    "step3: entrypoint %s requested more context — "
+                    "re-call at hop_depth=%d (was %d at N=%d)",
+                    ep.get("id"), escalation_hop_depth,
+                    n_nodes, DEFAULT_HOP_DEPTH,
+                )
+                try:
+                    deeper_ir, dn_nodes, dn_edges, dn_excerpts, dn_attempts = (
+                        _attempt_at_depth(ep, hop_depth=escalation_hop_depth)
+                    )
+                    info.update({
+                        "escalated": True,
+                        "escalation_hop_depth": escalation_hop_depth,
+                        "original_neighborhood_nodes": n_nodes,
+                        "neighborhood_nodes": dn_nodes,
+                        "neighborhood_edges": dn_edges,
+                        "excerpts": dn_excerpts,
+                        "attempts": attempts + dn_attempts,
+                        "hop_depth": escalation_hop_depth,
+                    })
+                    ir_parsed = deeper_ir
+                except Exception as esc_exc:  # noqa: BLE001
+                    # Escalation failed — keep the N=2 IR and note
+                    # the failure so operators can audit.
+                    err = f"{type(esc_exc).__name__}: {esc_exc}"
+                    logger.warning(
+                        "step3: escalation failed for %s — keeping N=%d IR. %s",
+                        ep.get("id"), DEFAULT_HOP_DEPTH, err[:200],
+                    )
+                    info["escalation_error"] = err[:300]
+            # Strip the meta-signal so the persisted IR conforms
+            # cleanly to the on-disk schema.
+            ir_parsed.pop("needs_more_context", None)
+            return idx, ir_parsed, info
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
             err = f"{type(exc).__name__}: {exc}"
             logger.warning(

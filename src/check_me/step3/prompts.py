@@ -137,6 +137,41 @@ PART D — Evidence anchors.
   the LLM saw. Cited line numbers MUST appear in the input. The
   anchors are downstream Step 4's primary citation source.
 
+PART E — Context-sufficiency signal (escalation).
+
+  After walking the input, judge whether the neighborhood
+  given is sufficient to anchor the IR with high confidence.
+  Set ``needs_more_context: true`` in the output ONLY when at
+  least one of the following is concretely missing AND naming
+  it in ``uncertainty`` would let a re-call at deeper hops
+  resolve the gap:
+
+    - a key callee whose body is referenced in the input but
+      whose definition is NOT in the source excerpts (the
+      neighborhood stopped one hop short of the harmful line),
+    - a state-axis link the substrate suggests (a shared
+      global appears in another function's def_use rows) but
+      whose body excerpt is not attached, leaving the
+      cross-function state interaction unverifiable,
+    - the chain clearly continues past a node already in the
+      input but the next-hop callee body is absent, so you
+      cannot place the sink at its true depth.
+
+  When you set ``needs_more_context: true``, name the missing
+  function or state link explicitly in ``uncertainty`` (e.g.
+  "callee ``foo`` body absent; sink likely at foo:NN" or
+  "state link via ``g_state`` to ``bar`` not visible"). The
+  runner will recompute the neighborhood at the next hop depth
+  and re-call you with the deeper input. Default is
+  ``needs_more_context: false`` — set it sparingly, only when
+  you have a concrete missing-anchor to name. Flagging
+  unnecessarily wastes budget and discards a valid IR you
+  could have finalised.
+
+  Even when you set ``needs_more_context: true``, still emit
+  the best IR you can build from the input you have — the
+  field is a request for re-call, not a refusal to answer.
+
 Output:
 
   - confidence: high | medium | low — the LLM's subjective
@@ -200,7 +235,8 @@ The output JSON must have this shape:
      "note": "<why this line matters>"}
   ],
   "confidence": "high | medium | low",
-  "uncertainty": "<text>"
+  "uncertainty": "<text>",
+  "needs_more_context": <bool, default false — see Part E>
 }
 
 The "id" field is overwritten by the runner with a globally-
@@ -349,5 +385,9 @@ IR_OUTPUT_SCHEMA: dict[str, Any] = {
         },
         "confidence": {"enum": ["high", "medium", "low"]},
         "uncertainty": {"type": "string"},
+        # Part E — optional escalation signal. The runner reads
+        # this field; it is stripped from the persisted IR before
+        # writing to disk so the on-disk schema stays clean.
+        "needs_more_context": {"type": "boolean"},
     },
 }

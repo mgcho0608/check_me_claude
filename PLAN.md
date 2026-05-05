@@ -299,6 +299,38 @@ What it deliberately **omits** vs richer alternatives:
 - `conditions.blocking` is the canonical place to record the
   fix's missing guard, even when the vulnerable code lacks it.
 
+### Retrieval policy: N=2 hybrid + escalation
+
+Per-IR retrieval is deterministic (PLAN Rule 11) and consists
+of two axes that feed the same neighborhood set:
+
+  - **Axis A — call edges.** BFS in the substrate's `call_graph`
+    from the entrypoint, both directions, to depth `N` (default
+    2). Seed step is file-anchored so same-name C overloads
+    across translation units don't pollute the slice.
+  - **Axis B — shared global state.** From the entrypoint and
+    its hop-1 call neighbours, every other function in the
+    substrate that references at least one of those identifiers
+    (via `data_control_flow` def_use rows) joins as a state
+    neighbour. This recovers chains where the harmful frame is
+    not directly callee-reachable but shares a global packet
+    buffer / state struct (e.g. contiki's
+    `process_thread_tcpip_process` → `tcpip_input` → ... →
+    `uip_process` via `uip_buf`).
+
+**Escalation (N=2 → N=3).** The per-IR LLM may set
+`needs_more_context: true` when it can name a concrete missing
+anchor (a callee body it expected to see, a state link it could
+not verify from the excerpts). The runner then recomputes the
+neighborhood at the configured escalation depth (default 3) and
+re-issues the synthesis call with the deeper input. The deeper
+IR replaces the original; the signalling field is stripped from
+the persisted IR. Escalation runs at most once per IR (the
+deeper call's `needs_more_context` is recorded as
+`uncertainty` text but not acted on) so an unconditional flag-
+loop cannot consume unbounded budget. Disable via
+`enable_escalation=False` for fixed-N=2 runs.
+
 ---
 
 ## 4. Dataset Strategy
@@ -580,6 +612,8 @@ Single-file fixtures are useful for primitive unit tests but insufficient for pi
 ### Rule 11: Retrieval is deterministic, not LLM-chosen
 The code that Steps 3/4 LLM can see is determined by substrate edge-based N-hop neighborhood (N=2), not by LLM's free selection. This prevents the LLM from cherry-picking supportive evidence while ignoring contradictory code.
 
+Escalation is permitted but bounded: the per-IR LLM may signal `needs_more_context: true` (with a named missing anchor in `uncertainty`), and the runner recomputes the neighborhood at the next hop tier (default 3). Escalation runs at most once per IR — the LLM cannot drive an unbounded retrieval expansion. The deepening axis is still the same deterministic call_graph + shared-global hybrid; the LLM never picks files itself.
+
 ### Rule 12: Implementation must be project-agnostic — no dataset-specific tunings
 Step 1's substrate extractor (and every subsequent extractor) must be project-agnostic. Implementation logic must never:
 
@@ -783,30 +817,55 @@ Step 3 (`src/check_me/step3/`):
 - Per-IR LLM synthesis (one IR per kept entrypoint), schema-
   validated against `evidence_irs.v1.json`. Per-call failure
   fallback + retry passes mirror Step 2's resilience.
+- **N=2 → N=3 escalation** (closes the original sketch's
+  "N=2 + escalation policy" requirement). The per-IR LLM
+  emits `needs_more_context: true` when it can name a concrete
+  missing anchor; the runner recomputes the neighborhood at
+  hop_depth=3 and re-issues the synthesis call. Once-per-IR cap
+  bounds budget. Default-on; toggle off with
+  `--no-escalation`. The signalling field is stripped from
+  the persisted IR so the on-disk schema stays clean.
 - Tests: 19 step3 test cases.
 
 Step 4 (`src/check_me/step4/`):
 
-- Single-call holistic scenario synthesis: receives all IRs +
-  source excerpts of each IR's sink-bearing nodes, weaves
-  scenarios per `attack_scenarios.v1.json`. Multi-IR chains are
-  the canonical case (libssh CVE-2018-10933 spans 3 IRs).
-- Tests: 7 step4 test cases.
+- **Chunked synthesis** (mirrors Step 2's chunked-miner
+  architecture). Sink-bearing IRs are partitioned into
+  fixed-size chunks (default 15); each chunk gets a fresh LLM
+  session whose Part A coverage rule applies only to its
+  assigned IR ids. The full IR list remains visible in every
+  chunk for cross-chunk multi-IR weaves. Per-chunk failures
+  retry independently; merge dedupes by
+  `(sink.function, sink.file, sink.line, sink.sink_type,
+  frozenset(evidence_ir_ids))` so two chunks producing the
+  same scenario don't double-count. Single-call mode is used
+  automatically when sink-bearing IR count ≤ chunk_size (so
+  small projects don't pay for chunking they don't need); CLI
+  knobs `--synth-chunk-size` / `--synth-max-workers`.
+- Source excerpts of each IR's sink-bearing nodes are still
+  passed verbatim so the LLM can verify `sink_type`. Multi-IR
+  chains remain the canonical case (libssh CVE-2018-10933 spans
+  3 IRs, woven within a single chunk or across chunks via the
+  cross-chunk weaving rule).
+- Tests: 7 step4 test cases (small fixtures use single-call
+  path; chunked path exercised on real datasets).
 
 Pytest total: 320+ all green. End-to-end gold recovery summary
 in the project README.
 
-### Known limitation — Step 4 selection at large IR scale
+### Resolved limitation — Step 4 selection at large IR scale
 
-For projects with many confident sink-bearing IRs (contiki: 76
-of 78 IRs are sink-bearing) the single-call Step 4 LLM
-synthesises ~15-20 scenarios and silently drops the rest, even
-when the prompt's coverage rule explicitly requires every
-confident sink-bearing IR to appear. Gold IR-047 (uip_process
-sink) is in `evidence_irs.json` but not referenced in
-`attack_scenarios.json` for contiki. Mitigation path: chunked
-Step 4 (mirroring the chunked-miner pattern from Step 2 — fixed
-chunk size, per-chunk fresh LLM session, dedup at merge);
-deferred to a follow-up.
+(Was open in the prior commit; resolved by chunked Step 4.)
+
+The single-call Step 4 LLM dropped 60+ scenarios silently on
+contiki's 76 confident sink-bearing IRs no matter how the
+coverage rule was phrased — the model abstracted "produce
+representative scenarios" as "produce ~15". Chunked Step 4 (15
+sink-bearing IRs per chunk, Part A coverage rule pinned to
+the assigned subset) removes that failure mode by reducing the
+per-call abstraction surface to a list small enough that the
+LLM treats coverage as a literal rather than a heuristic. The
+same mitigation pattern that fixed Step 2 lossless propagation
+applies here.
 
 ### Stage 3 — Full pipeline evaluation (not yet started)

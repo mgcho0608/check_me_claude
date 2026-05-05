@@ -47,7 +47,18 @@ class Step4Report:
     irs_total: int
     irs_with_sinks: int
     scenarios_produced: int
+    # Single-call mode: aggregate diagnostic for the one synthesis
+    # attempt (with retry_pass tracking on transient failures).
+    # Chunked mode: aggregate-status object summarising the run
+    # ({"ok": <any chunk produced scenarios>, "chunked": True,
+    #   "chunks": N, "succeeded": M, ...}). Per-chunk detail goes
+    # in ``synth_chunks``.
     synth_call: dict[str, Any] = field(default_factory=dict)
+    # Populated only in chunked mode; one entry per chunk with
+    # assigned IR ids, proposed scenario count, kept-after-dedupe
+    # count, and ok / error fields. Empty in single-call mode.
+    synth_chunks: list[dict[str, Any]] = field(default_factory=list)
+    chunked: bool = False
     elapsed_sec: float = 0.0
 
 
@@ -126,6 +137,8 @@ def run(
     config: Config | None = None,
     client: Any | None = None,
     sink_context_lines: int = DEFAULT_SINK_CONTEXT_LINES,
+    synth_chunk_size: int = synth_mod.DEFAULT_CHUNK_SIZE,
+    synth_max_workers: int = synth_mod.DEFAULT_MAX_WORKERS,
     synth_retry_passes: int = 2,
     synth_retry_cooldown_sec: float = 60.0,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
@@ -135,6 +148,25 @@ def run(
     Returns ``(attack_scenarios_json, report)``. Writes the
     output to ``out_path`` if supplied. The shape matches
     ``schemas/attack_scenarios.v1.json``.
+
+    Two execution modes (chosen automatically by IR count):
+
+      - **single-call** when sink-bearing IR count is ≤
+        ``synth_chunk_size``. One LLM call sees all IRs and
+        emits all scenarios. The retry loop wraps the single
+        call.
+      - **chunked** when sink-bearing IR count >
+        ``synth_chunk_size``. Sink-bearing IR ids are split
+        into fixed-size chunks; each chunk gets a fresh LLM
+        session whose Part A coverage rule applies only to its
+        assigned IRs (the full IR list is still visible as
+        cross-chunk weaving context). Per-chunk failures are
+        retried within the chunked path itself; the outer retry
+        loop is bypassed because per-chunk retry is more
+        granular. Mirrors Step 2's chunked-miner architecture.
+
+    Pass ``synth_chunk_size=0`` to force single-call mode (e.g.
+    for backwards-compat profiling).
     """
     start = time.monotonic()
 
@@ -156,37 +188,41 @@ def run(
     if client is None:
         client = make_client(config)
 
-    def _attempt_synthesis() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        try:
-            result = synth_mod.synthesise_scenarios(
-                client=client, config=config,
-                evidence_irs=irs, sink_excerpts=sink_excerpts,
-                project=project, cve=cve,
-                chat_fn=chat_fn,
-            )
-            scenarios = result.parsed.get("attack_scenarios", [])
-            return scenarios, {"ok": True, "attempts": result.attempts}
-        except Exception as exc:  # noqa: BLE001
-            err = f"{type(exc).__name__}: {exc}"
-            logger.warning("step4: synthesis call failed — %s", err[:200])
-            return [], {"ok": False, "error": err[:300]}
+    # Decide single-call vs chunked. We chunk when the sink-
+    # bearing IR count exceeds the chunk size — small projects
+    # take the cheaper single-call path; large ones (contiki:
+    # 76 confident sink IRs) get chunked coverage.
+    sink_bearing_ids = synth_mod.collect_sink_bearing_ir_ids(irs)
+    use_chunked = (
+        synth_chunk_size > 0
+        and len(sink_bearing_ids) > synth_chunk_size
+    )
 
-    scenarios, info = _attempt_synthesis()
-
-    # Retry passes — sequentially re-attempt on failure with cooldown.
-    for retry_pass in range(1, synth_retry_passes + 1):
-        if info.get("ok"):
-            break
-        logger.info(
-            "step4: retry pass %d/%d — sleeping %.0fs",
-            retry_pass, synth_retry_passes, synth_retry_cooldown_sec,
+    if use_chunked:
+        scenarios, info, chunks_diag = _run_chunked(
+            client=client, config=config,
+            irs=irs, sink_excerpts=sink_excerpts,
+            project=project, cve=cve,
+            chunk_size=synth_chunk_size,
+            max_workers=synth_max_workers,
+            retry_passes=synth_retry_passes,
+            retry_cooldown_sec=synth_retry_cooldown_sec,
+            chat_fn=chat_fn,
         )
-        if synth_retry_cooldown_sec > 0:
-            time.sleep(synth_retry_cooldown_sec)
-        scenarios, new_info = _attempt_synthesis()
-        info = {**new_info, "retry_pass": retry_pass}
+    else:
+        scenarios, info = _run_single(
+            client=client, config=config,
+            irs=irs, sink_excerpts=sink_excerpts,
+            project=project, cve=cve,
+            retry_passes=synth_retry_passes,
+            retry_cooldown_sec=synth_retry_cooldown_sec,
+            chat_fn=chat_fn,
+        )
+        chunks_diag = []
 
-    # Renumber ids globally for stability.
+    # Renumber ids globally for stability. (Chunked path also
+    # renumbers internally before returning, but we re-do it
+    # uniformly so the runner is the single source of truth.)
     for i, sc in enumerate(scenarios, 1):
         sc["id"] = f"AS-{i:03d}"
 
@@ -208,6 +244,160 @@ def run(
         irs_with_sinks=len(sink_excerpts),
         scenarios_produced=len(scenarios),
         synth_call=info,
+        synth_chunks=chunks_diag,
+        chunked=use_chunked,
         elapsed_sec=elapsed,
     )
     return output, report
+
+
+def _run_single(
+    *,
+    client: Any,
+    config: Config,
+    irs: list[dict[str, Any]],
+    sink_excerpts: dict[str, str],
+    project: str,
+    cve: str,
+    retry_passes: int,
+    retry_cooldown_sec: float,
+    chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Single-call synthesis with the original retry-on-failure
+    loop. Used when the sink-bearing IR count fits in one chunk."""
+    def _attempt_synthesis() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        try:
+            result = synth_mod.synthesise_scenarios(
+                client=client, config=config,
+                evidence_irs=irs, sink_excerpts=sink_excerpts,
+                project=project, cve=cve,
+                chat_fn=chat_fn,
+            )
+            scenarios = result.parsed.get("attack_scenarios", [])
+            return scenarios, {"ok": True, "attempts": result.attempts}
+        except Exception as exc:  # noqa: BLE001
+            err = f"{type(exc).__name__}: {exc}"
+            logger.warning("step4: synthesis call failed — %s", err[:200])
+            return [], {"ok": False, "error": err[:300]}
+
+    scenarios, info = _attempt_synthesis()
+    for retry_pass in range(1, retry_passes + 1):
+        if info.get("ok"):
+            break
+        logger.info(
+            "step4: retry pass %d/%d — sleeping %.0fs",
+            retry_pass, retry_passes, retry_cooldown_sec,
+        )
+        if retry_cooldown_sec > 0:
+            time.sleep(retry_cooldown_sec)
+        scenarios, new_info = _attempt_synthesis()
+        info = {**new_info, "retry_pass": retry_pass}
+    return scenarios, info
+
+
+def _run_chunked(
+    *,
+    client: Any,
+    config: Config,
+    irs: list[dict[str, Any]],
+    sink_excerpts: dict[str, str],
+    project: str,
+    cve: str,
+    chunk_size: int,
+    max_workers: int,
+    retry_passes: int,
+    retry_cooldown_sec: float,
+    chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse],
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    """Chunked synthesis with per-chunk retry sweep.
+
+    First pass: ``synthesise_scenarios_chunked`` over all chunks.
+    Each chunk that raised contributes 0 scenarios and an error
+    record in ``per_chunk``. Subsequent retry passes re-call ONLY
+    the failed chunks (after a cooldown), so transient hiccups
+    don't kill the run and successful chunks are not redundantly
+    re-issued. Successful retries' scenarios are merged into the
+    surviving set with the same dedupe key as the first pass."""
+    first = synth_mod.synthesise_scenarios_chunked(
+        client=client, config=config,
+        evidence_irs=irs, sink_excerpts=sink_excerpts,
+        project=project, cve=cve,
+        chunk_size=chunk_size,
+        max_workers=max_workers,
+        chat_fn=chat_fn,
+    )
+    scenarios: list[dict[str, Any]] = list(first.parsed.get("attack_scenarios", []))
+    per_chunk: list[dict[str, Any]] = list(first.per_chunk)
+    seen: set[tuple[Any, ...]] = {
+        synth_mod._scenario_dedupe_key(sc) for sc in scenarios
+    }
+
+    # Retry sweep — only re-call chunks whose first pass failed.
+    for retry_pass in range(1, retry_passes + 1):
+        failed_indices = [
+            d["chunk_index"] for d in per_chunk if not d.get("ok")
+        ]
+        if not failed_indices:
+            break
+        logger.info(
+            "step4: retry pass %d/%d on %d failed chunk(s) — sleeping %.0fs",
+            retry_pass, retry_passes, len(failed_indices), retry_cooldown_sec,
+        )
+        if retry_cooldown_sec > 0:
+            time.sleep(retry_cooldown_sec)
+        chunk_total = len(per_chunk)
+        for i in failed_indices:
+            assigned = per_chunk[i].get("assigned") or []
+            try:
+                r = synth_mod.synthesise_scenarios(
+                    client=client, config=config,
+                    evidence_irs=irs, sink_excerpts=sink_excerpts,
+                    project=project, cve=cve,
+                    assigned_ir_ids=assigned,
+                    chunk_index=i,
+                    chunk_total=chunk_total,
+                    chat_fn=chat_fn,
+                )
+                proposed = (r.parsed or {}).get("attack_scenarios", []) or []
+                kept = 0
+                for sc in proposed:
+                    key = synth_mod._scenario_dedupe_key(sc)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    scenarios.append(sc)
+                    kept += 1
+                per_chunk[i] = {
+                    **per_chunk[i],
+                    "ok": True,
+                    "proposed": len(proposed),
+                    "kept_after_dedupe": kept,
+                    "attempts": r.attempts,
+                    "retry_pass": retry_pass,
+                    "error": None,
+                }
+            except Exception as exc:  # noqa: BLE001
+                err = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "step4: chunk %d still failing on retry %d — %s",
+                    i, retry_pass, err[:200],
+                )
+                per_chunk[i] = {
+                    **per_chunk[i],
+                    "ok": False,
+                    "error": err[:300],
+                    "retry_pass": retry_pass,
+                }
+
+    # Re-sort with dedupe key sort to keep merged set stable.
+    scenarios.sort(key=synth_mod._scenario_sort_key)
+
+    succeeded = sum(1 for d in per_chunk if d.get("ok"))
+    info = {
+        "ok": succeeded > 0,
+        "chunked": True,
+        "chunks": len(per_chunk),
+        "succeeded": succeeded,
+        "failed": len(per_chunk) - succeeded,
+    }
+    return scenarios, info, per_chunk

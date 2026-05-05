@@ -63,26 +63,33 @@ Hard constraints:
     role node and no plausible cross-IR chain to a sink; in
     every other case it must list at least one scenario.
 
-  - **Coverage rule (do not omit confident sinks).** Every IR
-    in the input that BOTH (a) has ``confidence`` of ``high``
-    or ``medium`` AND (b) contains a path node with
-    ``role: sink`` MUST appear as ``evidence_ir`` in at least
-    one scenario's ``exploit_chain``. The same IR may be
+  - **Coverage rule (do not omit assigned IRs).** The user
+    message lists an "Assigned IRs" set. Every IR id in that
+    set MUST appear as ``evidence_ir`` in at least one
+    scenario's ``exploit_chain``. The same IR may be
     referenced by multiple scenarios (e.g. distinct exploit
     paths that share a final sink); the requirement is that
-    no such IR is silently dropped from the output. If two
-    sink-bearing IRs share the same harmful operation but
+    no assigned IR is silently dropped from the output. If
+    two assigned IRs share the same harmful operation but
     differ in their attack surface (e.g. UDP vs TCP, server
     vs client role, distinct entrypoint families), produce
     a separate scenario for each — they represent different
     attacker-controlled paths and downstream consumers may
     treat them as independent vulnerabilities.
 
-    Low-confidence sink-bearing IRs may be omitted, and IRs
-    without a ``sink`` role node may be omitted (they have no
-    harmful operation to anchor a scenario). Use the
-    ``uncertainty`` field to record any IR you considered but
-    chose not to include and why.
+    The full evidence_irs list also contains non-assigned
+    IRs (when a chunked run is in progress, other chunks
+    cover them). Non-assigned IRs are visible as CONTEXT —
+    you may reference them in a multi-IR weave when an
+    assigned IR's chain naturally threads through one (e.g.
+    an assigned entrypoint IR ends at a dispatcher and a
+    non-assigned IR rooted at the dispatched callee carries
+    the chain to a sink). Do NOT emit a scenario whose
+    primary anchor is a non-assigned IR — that would
+    duplicate the chunk that owns it.
+
+    Use the ``uncertainty`` field to record any IR you
+    considered but chose not to make primary and why.
 
   - ``exploit_chain.steps`` must have at least one step. Every
     step must include ``order``, ``evidence_ir`` (an IR id from
@@ -160,6 +167,9 @@ def build_synthesis_messages(
     cve: str,
     evidence_irs: list[dict[str, Any]],
     sink_excerpts: dict[str, str],
+    assigned_ir_ids: list[str] | None = None,
+    chunk_index: int | None = None,
+    chunk_total: int | None = None,
 ) -> tuple[str, str]:
     """Return ``(system, user)`` prompts for one Step 4 scenario
     synthesis call.
@@ -171,8 +181,35 @@ def build_synthesis_messages(
     where the IR claims and to pick the correct ``sink_type``.
     Pass ``{}`` to omit excerpts (smaller prompt, no source
     verification).
+
+    ``assigned_ir_ids`` is the list of IR ids THIS call must
+    cover (Part A coverage rule). When a chunked run is active,
+    only this subset is the call's responsibility; other IRs in
+    ``evidence_irs`` are visible as cross-chunk weaving context.
+    When ``None``, the runner derives a default — every IR with a
+    sink-role node and confidence ``high`` or ``medium`` — which
+    matches the original single-call coverage semantics.
+
+    ``chunk_index`` / ``chunk_total`` are diagnostic; if both
+    supplied the user message header notes "chunk K of N" so
+    operators reading saved prompts can correlate.
     """
     irs_block = json.dumps(evidence_irs, indent=2)
+
+    if assigned_ir_ids is None:
+        assigned_ir_ids = _default_assigned_ir_ids(evidence_irs)
+    assigned_set = list(dict.fromkeys(assigned_ir_ids))  # dedupe, preserve order
+    if assigned_set:
+        assigned_block = "Assigned IRs (Part A coverage — emit ≥1 scenario per id):\n" + "\n".join(
+            f"- {ir_id}" for ir_id in assigned_set
+        ) + "\n\n"
+    else:
+        assigned_block = (
+            "Assigned IRs: (empty — no IR in this chunk requires a"
+            " primary scenario; emit only multi-IR weaves whose"
+            " primary anchor sits in another chunk's assigned set,"
+            " or an empty attack_scenarios array if none apply)\n\n"
+        )
 
     excerpt_chunks: list[str] = []
     for ir_id in sorted(sink_excerpts.keys()):
@@ -184,11 +221,17 @@ def build_synthesis_messages(
         "(no sink-bearing source excerpts provided)"
     )
 
+    chunk_header = ""
+    if chunk_index is not None and chunk_total is not None:
+        chunk_header = f"Chunk {chunk_index + 1} of {chunk_total}.\n"
+
     user = (
-        f"Project: {project}  CVE: {cve}\n\n"
+        f"Project: {project}  CVE: {cve}\n"
+        f"{chunk_header}\n"
         "Evidence IRs (Step 3 output — one IR per kept entrypoint,"
         " each with path nodes / edges / conditions / anchors):\n\n"
         f"```json\n{irs_block}\n```\n\n"
+        + assigned_block +
         "Source-code excerpts for IRs that contain a ``sink``"
         " role node (so you can verify the sink_type):\n\n"
         f"```\n{excerpts_text}\n```\n\n"
@@ -197,6 +240,44 @@ def build_synthesis_messages(
         + _OUTPUT_SHAPE
     )
     return _SYSTEM, user
+
+
+def _default_assigned_ir_ids(evidence_irs: list[dict[str, Any]]) -> list[str]:
+    """Single-call default: every IR with a sink-role node and
+    confidence ``high`` or ``medium`` is assigned. Mirrors the
+    original (pre-chunked) coverage rule so behaviour for callers
+    that don't supply an explicit assignment is unchanged."""
+    out: list[str] = []
+    for ir in evidence_irs:
+        ir_id = ir.get("id")
+        if not isinstance(ir_id, str):
+            continue
+        if ir.get("confidence") not in ("high", "medium"):
+            continue
+        nodes = (ir.get("path") or {}).get("nodes") or []
+        if any(n.get("role") == "sink" for n in nodes):
+            out.append(ir_id)
+    return out
+
+
+def collect_sink_bearing_ir_ids(
+    evidence_irs: list[dict[str, Any]],
+    *,
+    confidence_floor: tuple[str, ...] = ("high", "medium"),
+) -> list[str]:
+    """Public helper for the runner to enumerate the set of IRs
+    that the chunked Step 4 must distribute across chunks."""
+    out: list[str] = []
+    for ir in evidence_irs:
+        ir_id = ir.get("id")
+        if not isinstance(ir_id, str):
+            continue
+        if ir.get("confidence") not in confidence_floor:
+            continue
+        nodes = (ir.get("path") or {}).get("nodes") or []
+        if any(n.get("role") == "sink" for n in nodes):
+            out.append(ir_id)
+    return out
 
 
 # Schema the LLM output must match. Mirrors the per-scenario

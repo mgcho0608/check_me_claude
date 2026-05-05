@@ -267,6 +267,25 @@ def main(argv: list[str] | None = None) -> int:
             " Use for audit / recall dips."
         ),
     )
+    p4.add_argument(
+        "--no-escalation",
+        action="store_true",
+        help=(
+            "Disable the N=2→N=3 escalation pass. By default, when the"
+            " per-IR LLM sets needs_more_context: true, the runner"
+            " recomputes the neighborhood at deeper hops and re-issues"
+            " the synthesis call."
+        ),
+    )
+    p4.add_argument(
+        "--escalation-hop-depth",
+        type=int,
+        default=3,
+        help=(
+            "Hop depth used when escalating an IR that requested more"
+            " context (default: 3, i.e. N=2 → N=3)."
+        ),
+    )
     p4.set_defaults(func=_step3)
 
     p5 = sub.add_parser(
@@ -279,6 +298,25 @@ def main(argv: list[str] | None = None) -> int:
     p5.add_argument("--evidence-irs", required=True, help="path to a step3 evidence_irs JSON")
     p5.add_argument("--source", required=True, help="project source root")
     p5.add_argument("--out", required=True, help="output path for attack_scenarios.json")
+    p5.add_argument(
+        "--synth-chunk-size",
+        type=int,
+        default=step4_runner.synth_mod.DEFAULT_CHUNK_SIZE,
+        help=(
+            "Sink-bearing IRs per chunked Step 4 call (default: 15)."
+            " Single-call mode is used when sink-bearing IR count <="
+            " this. Set to 0 to force single-call regardless of size."
+        ),
+    )
+    p5.add_argument(
+        "--synth-max-workers",
+        type=int,
+        default=step4_runner.synth_mod.DEFAULT_MAX_WORKERS,
+        help=(
+            "Concurrent chunked-Step-4 LLM calls (default: 1, i.e."
+            " sequential). Raise when provider per-minute quotas allow."
+        ),
+    )
     p5.set_defaults(func=_step4)
 
     p6 = sub.add_parser(
@@ -352,6 +390,8 @@ def _step3(args: argparse.Namespace) -> int:
         source_root=source_root,
         out_path=out_path,
         include_quarantined=args.include_quarantined,
+        enable_escalation=not args.no_escalation,
+        escalation_hop_depth=args.escalation_hop_depth,
     )
     ok = sum(1 for c in report.synth_calls if c.get("ok"))
     fail = sum(1 for c in report.synth_calls if not c.get("ok"))
@@ -378,12 +418,19 @@ def _step4(args: argparse.Namespace) -> int:
         evidence_irs_path=irs_path,
         source_root=source_root,
         out_path=out_path,
+        synth_chunk_size=args.synth_chunk_size,
+        synth_max_workers=args.synth_max_workers,
+    )
+    chunk_note = (
+        f" chunks={report.synth_call.get('succeeded')}/{report.synth_call.get('chunks')}"
+        if report.chunked else ""
     )
     print(
         f"step4: project={report.project!r} cve={report.cve!r}"
         f" irs={report.irs_total} (with_sinks={report.irs_with_sinks})"
         f" scenarios={report.scenarios_produced}"
         f" synth_ok={report.synth_call.get('ok')}"
+        f" chunked={report.chunked}{chunk_note}"
         f" elapsed={report.elapsed_sec:.1f}s -> {out_path}"
     )
     return 0
