@@ -686,26 +686,82 @@ This appendix tracks the implemented portion of the 4-step pipeline. Updated as 
 - All 7 substrate categories implemented (`src/check_me/step1/`):
   call_graph, data_control_flow, guards, trust_boundaries,
   config_mode_command_triggers, callback_registrations,
-  evidence_anchors.
+  evidence_anchors. Generality round added 4 mechanisms
+  (struct_initializer + callback_argument in
+  callback_registrations, switch-case in guards, argv-of-main +
+  POSIX audit in trust_boundaries).
 - Regex baseline (`src/check_me/step1/regex_baseline.py`) +
   `regex-compare` CLI subcommand for the architectural-decision
   metric.
-- Pytest: 157/157 passing on synthetic primitives across 9 test
-  modules.
 - Datasets: 3 project-level CVE datasets (contiki-ng, libssh,
   dnsmasq), each with `metadata.json`, vendored `source/` at
   vulnerable_commit, 4-step gold (substrate / entrypoints /
   evidence_irs / attack_scenarios), and `notes.md` audit logs.
-- Gold-row coverage on the 3 datasets after the round-2
-  label-honesty audit: 47/58 = 81% (see
-  `out/STAGE0_AUDIT_GENERALITY.md`).
-- All 4 Stage-0 exit criteria met (see §5 Stage 0 above).
 
-### Stage 1 — Step 2 + Step 3 (not yet started)
+### Stage 1 — Step 2 (✅ closed)
 
-To be planned and built. Inputs: Stage-0 substrate output and the
-Step-2 / Step-3 prompt designs described in §5.
+- Chunked miner with per-chunk failure fallback (one row per
+  candidate_function — lossless propagation), `(function, file)`
+  dedup at merge, sequential default to stay under per-minute
+  provider quotas.
+- Per-candidate verifier with synthetic-quarantine fallback +
+  sequential retry passes (default 2, with 60s cooldown) so a
+  single LLM hiccup doesn't kill the run.
+- Anchoring prevention: miner reasoning keys stripped before the
+  verifier sees the candidate (`prompts.candidate_for_verifier`).
+- Verifier focused slice: 2-hop hybrid (call edges + shared global
+  state co-readers) with same-name C overload disambiguation;
+  per-candidate fairness for the call-graph cap.
+- Tests: ~110 step2/llm test cases.
+- Gold-recovery on the 3 datasets:
+  - libssh: EP-001 (ssh_packet_socket_callback) +
+    EP-002 (ssh_packet_process) both kept ✓
+  - dnsmasq: EP-001 (receive_query) + EP-002 (tcp_request)
+    both kept ✓
+  - contiki: process_thread_tcpip_process kept (PROCESS macro
+    expansion via struct_initializer) — gold's tcpip_input is
+    a substrate-invisible internal callee handled at Step 3 via
+    the N=2 hybrid retrieval.
 
-### Stage 2 — Step 4 (not yet started)
+### Stage 2 — Step 3 + Step 4 (✅ closed)
+
+Step 3 (`src/check_me/step3/`):
+
+- Deterministic N=2 hybrid retrieval: BFS on call_graph (both
+  directions) + shared-global-state axis via data_control_flow
+  def_use rows.
+- Function→definition-file map built from the substrate so a
+  callee defined in one file but called from many resolves to
+  its body file (fixes a bug that left dnsmasq's
+  `add_resource_record` and contiki's deeper IR-stack callees
+  source-less in early iterations).
+- Per-IR LLM synthesis (one IR per kept entrypoint), schema-
+  validated against `evidence_irs.v1.json`. Per-call failure
+  fallback + retry passes mirror Step 2's resilience.
+- Tests: 19 step3 test cases.
+
+Step 4 (`src/check_me/step4/`):
+
+- Single-call holistic scenario synthesis: receives all IRs +
+  source excerpts of each IR's sink-bearing nodes, weaves
+  scenarios per `attack_scenarios.v1.json`. Multi-IR chains are
+  the canonical case (libssh CVE-2018-10933 spans 3 IRs).
+- Tests: 7 step4 test cases.
+
+Pytest total: 320+ all green. End-to-end gold recovery summary
+in the project README.
+
+### Known limitation — Step 4 selection at large IR scale
+
+For projects with many confident sink-bearing IRs (contiki: 76
+of 78 IRs are sink-bearing) the single-call Step 4 LLM
+synthesises ~15-20 scenarios and silently drops the rest, even
+when the prompt's coverage rule explicitly requires every
+confident sink-bearing IR to appear. Gold IR-047 (uip_process
+sink) is in `evidence_irs.json` but not referenced in
+`attack_scenarios.json` for contiki. Mitigation path: chunked
+Step 4 (mirroring the chunked-miner pattern from Step 2 — fixed
+chunk size, per-chunk fresh LLM session, dedup at merge);
+deferred to a follow-up.
 
 ### Stage 3 — Full pipeline evaluation (not yet started)
