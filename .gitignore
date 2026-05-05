@@ -13,10 +13,7 @@ build/
 .mypy_cache/
 .ruff_cache/
 
-# 런타임 산출물 (schema/dataset 라벨/메타는 예외)
-*.json
-!schemas/**/*.json
-!datasets/**/*.json
+# 환경 설정 외 모든 파일 추적 (현 단계에서 out/ 산출물도 함께 commit).
 
 # 에디터
 .vscode/
