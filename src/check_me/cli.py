@@ -1,24 +1,55 @@
 """Command-line entry point.
 
-Two subcommands:
+Subcommands cover all four pipeline steps plus the gold-vs-output
+evaluator:
 
-- ``step1`` — run the deterministic substrate extractor over a
-  project source tree and write a substrate JSON document.
-- ``regex-compare`` — run both the Clang AST call_graph extractor
-  and the naive regex baseline on the same tree and print a
-  comparison report (Stage 0 exit criterion 1).
+- ``step1`` — deterministic substrate extraction from a project
+  source tree.
+- ``regex-compare`` — Clang vs regex baseline diagnostic (Stage 0
+  exit criterion 1).
+- ``step2`` — LLM entrypoint mining + verification over a Step 1
+  substrate.
+- ``step3`` — LLM Evidence IR synthesis over Step 1 substrate +
+  Step 2 entrypoints + project source.
+- ``step4`` — LLM attack scenario synthesis over Step 3 IRs +
+  project source.
+- ``eval`` — gold-vs-output matching across all four steps for
+  one dataset; writes ``eval_report.json`` per PLAN §5 Stage 3
+  exit criteria.
 
-Both subcommands take ``--src`` (project root), ``--project``,
-``--cve``, and a repeatable ``--extra-arg`` flag for clang
-arguments injected when no ``compile_commands.json`` is
-available.
+LLM-using subcommands (``step2`` / ``step3`` / ``step4`` /
+``eval``) read ``CHECK_ME_LLM_*`` env vars (see
+``docs/LLM_CONFIG.md``).
 
-Example::
+Examples::
 
+    # Stage 0
     python -m check_me step1 \\
-      --src datasets/<project>-<cve>/source \\
-      --project <project> --cve <CVE-id> \\
-      --out out/<project>-<cve>/substrate.json
+      --src datasets/libssh-CVE-2018-10933/source \\
+      --project libssh --cve CVE-2018-10933 \\
+      --out out/libssh-CVE-2018-10933/substrate.json
+
+    # Stage 1
+    python -m check_me step2 \\
+      --substrate out/libssh-CVE-2018-10933/substrate.json \\
+      --out out/libssh-CVE-2018-10933/entrypoints.json
+
+    # Stage 2
+    python -m check_me step3 \\
+      --substrate out/libssh-CVE-2018-10933/substrate.json \\
+      --entrypoints out/libssh-CVE-2018-10933/entrypoints.json \\
+      --source datasets/libssh-CVE-2018-10933/source \\
+      --out out/libssh-CVE-2018-10933/evidence_irs.json
+    python -m check_me step4 \\
+      --evidence-irs out/libssh-CVE-2018-10933/evidence_irs.json \\
+      --source datasets/libssh-CVE-2018-10933/source \\
+      --out out/libssh-CVE-2018-10933/attack_scenarios.json
+
+    # Stage 3
+    python -m check_me eval \\
+      --gold datasets/libssh-CVE-2018-10933/gold \\
+      --out-dir out/libssh-CVE-2018-10933 \\
+      --report out/libssh-CVE-2018-10933/eval_report.json
 """
 
 from __future__ import annotations
@@ -32,6 +63,9 @@ from .step1 import call_graph as cg_mod
 from .step1 import regex_baseline as regex_mod
 from .step1 import runner as step1_runner
 from .step2 import runner as step2_runner
+from .step3 import runner as step3_runner
+from .step4 import runner as step4_runner
+from .eval import runner as eval_runner
 
 
 def _step1(args: argparse.Namespace) -> int:
@@ -213,6 +247,67 @@ def main(argv: list[str] | None = None) -> int:
     p3.add_argument("--out", required=True, help="output path for entrypoints.json")
     p3.set_defaults(func=_step2)
 
+    p4 = sub.add_parser(
+        "step3",
+        help=(
+            "Run Step 3 (LLM Evidence IR synthesis) over Step 1 substrate"
+            " + Step 2 entrypoints + project source. Reads CHECK_ME_LLM_*"
+            " from env or .env."
+        ),
+    )
+    p4.add_argument("--substrate", required=True, help="path to a step1 substrate JSON")
+    p4.add_argument("--entrypoints", required=True, help="path to a step2 entrypoints JSON")
+    p4.add_argument("--source", required=True, help="project source root (matches step1 --src)")
+    p4.add_argument("--out", required=True, help="output path for evidence_irs.json")
+    p4.add_argument(
+        "--include-quarantined",
+        action="store_true",
+        help=(
+            "Also synthesise IRs for quarantined entrypoints (default: kept-only)."
+            " Use for audit / recall dips."
+        ),
+    )
+    p4.set_defaults(func=_step3)
+
+    p5 = sub.add_parser(
+        "step4",
+        help=(
+            "Run Step 4 (LLM attack scenario synthesis) over Step 3 IRs +"
+            " project source. Reads CHECK_ME_LLM_* from env or .env."
+        ),
+    )
+    p5.add_argument("--evidence-irs", required=True, help="path to a step3 evidence_irs JSON")
+    p5.add_argument("--source", required=True, help="project source root")
+    p5.add_argument("--out", required=True, help="output path for attack_scenarios.json")
+    p5.set_defaults(func=_step4)
+
+    p6 = sub.add_parser(
+        "eval",
+        help=(
+            "Match gold vs pipeline outputs across all 4 steps for one"
+            " dataset; write eval_report.json. Step 3 + Step 4 use the"
+            " LLM judge (CHECK_ME_LLM_*); Step 1 + Step 2 are deterministic."
+        ),
+    )
+    p6.add_argument("--gold", required=True, help="datasets/<key>/gold directory")
+    p6.add_argument("--out-dir", required=True, help="out/<key> directory with pipeline outputs")
+    p6.add_argument(
+        "--report",
+        required=False,
+        help="optional path for eval_report.json (defaults to <out-dir>/eval_report.json on success)",
+    )
+    p6.add_argument(
+        "--skip-step3",
+        action="store_true",
+        help="skip the LLM-judge pass over Step 3 IRs (faster sanity check)",
+    )
+    p6.add_argument(
+        "--skip-step4",
+        action="store_true",
+        help="skip the LLM-judge pass over Step 4 scenarios",
+    )
+    p6.set_defaults(func=_eval)
+
     args = parser.parse_args(argv)
     return args.func(args)
 
@@ -234,6 +329,98 @@ def _step2(args: argparse.Namespace) -> int:
         f" elapsed={report.elapsed_sec:.1f}s -> {out_path}"
     )
     return 0
+
+
+def _step3(args: argparse.Namespace) -> int:
+    substrate_path = Path(args.substrate)
+    entrypoints_path = Path(args.entrypoints)
+    source_root = Path(args.source)
+    out_path = Path(args.out)
+    for label, p in (
+        ("--substrate", substrate_path),
+        ("--entrypoints", entrypoints_path),
+    ):
+        if not p.is_file():
+            print(f"error: {label} not found: {p}", file=sys.stderr)
+            return 2
+    if not source_root.is_dir():
+        print(f"error: --source is not a directory: {source_root}", file=sys.stderr)
+        return 2
+    output, report = step3_runner.run(
+        substrate_path=substrate_path,
+        entrypoints_path=entrypoints_path,
+        source_root=source_root,
+        out_path=out_path,
+        include_quarantined=args.include_quarantined,
+    )
+    ok = sum(1 for c in report.synth_calls if c.get("ok"))
+    fail = sum(1 for c in report.synth_calls if not c.get("ok"))
+    print(
+        f"step3: project={report.project!r} cve={report.cve!r}"
+        f" entrypoints_used={report.entrypoints_used}/{report.entrypoints_total}"
+        f" irs={report.irs_produced} synth_ok={ok} synth_failed={fail}"
+        f" elapsed={report.elapsed_sec:.1f}s -> {out_path}"
+    )
+    return 0
+
+
+def _step4(args: argparse.Namespace) -> int:
+    irs_path = Path(args.evidence_irs)
+    source_root = Path(args.source)
+    out_path = Path(args.out)
+    if not irs_path.is_file():
+        print(f"error: --evidence-irs not found: {irs_path}", file=sys.stderr)
+        return 2
+    if not source_root.is_dir():
+        print(f"error: --source is not a directory: {source_root}", file=sys.stderr)
+        return 2
+    output, report = step4_runner.run(
+        evidence_irs_path=irs_path,
+        source_root=source_root,
+        out_path=out_path,
+    )
+    print(
+        f"step4: project={report.project!r} cve={report.cve!r}"
+        f" irs={report.irs_total} (with_sinks={report.irs_with_sinks})"
+        f" scenarios={report.scenarios_produced}"
+        f" synth_ok={report.synth_call.get('ok')}"
+        f" elapsed={report.elapsed_sec:.1f}s -> {out_path}"
+    )
+    return 0
+
+
+def _eval(args: argparse.Namespace) -> int:
+    gold_dir = Path(args.gold)
+    out_dir = Path(args.out_dir)
+    report_path = Path(args.report) if args.report else None
+    if not gold_dir.is_dir():
+        print(f"error: --gold is not a directory: {gold_dir}", file=sys.stderr)
+        return 2
+    if not out_dir.is_dir():
+        print(f"error: --out-dir is not a directory: {out_dir}", file=sys.stderr)
+        return 2
+    rep = eval_runner.run(
+        gold_dir=gold_dir,
+        out_dir=out_dir,
+        eval_report_path=report_path,
+        skip_step3=args.skip_step3,
+        skip_step4=args.skip_step4,
+    )
+    s1 = rep.step1.get("overall_recall")
+    s2 = rep.step2.get("gold_kept_recall_anywhere")
+    s3 = rep.step3.get("equivalent_recall") if isinstance(rep.step3, dict) else None
+    s4 = rep.step4.get("equivalent_recall") if isinstance(rep.step4, dict) else None
+    all_pass = rep.exit_criteria.get("all_pass")
+    print(
+        f"eval: project={rep.project!r} cve={rep.cve!r}"
+        f" step1_recall={s1} step2_recall_anywhere={s2}"
+        f" step3_equivalent={s3} step4_equivalent={s4}"
+        f" all_exit_criteria_pass={all_pass}"
+        f" elapsed={rep.elapsed_sec:.1f}s"
+    )
+    if report_path:
+        print(f" -> {report_path}")
+    return 0 if all_pass else 1
 
 
 if __name__ == "__main__":  # pragma: no cover

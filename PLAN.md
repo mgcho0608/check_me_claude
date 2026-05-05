@@ -201,58 +201,103 @@ Step 2's removal of false positives must be auditable. Low-confidence removals g
 
 ---
 
-## 3. Evidence IR Redesign
+## 3. Evidence IR Shape
 
-The Evidence IR evolves from a per-candidate data structure to an execution-path cluster.
+The Evidence IR is the line in the points-→-lines-→-shapes
+mental model: one IR per kept entrypoint, structured around a
+concrete execution path that downstream Step 4 can weave into
+attack scenarios. The shape is intentionally **lean** — schema-
+level vocabulary (role / kind enums) plus file:line provenance —
+so per-IR LLM synthesis stays bounded and the same JSON document
+can be hand-audited against gold without a separate ontology.
 
-### Current Evidence IR (per-candidate)
+### Schema (matches `schemas/evidence_irs.v1.json`)
 
 EvidenceIR {
-  action: "execute_image",
-  check: "verify_signature",
-  enforcement_strength: "weak",
-  inferred_family_candidates: [{"family": "VERIFY_BEFORE_EXECUTE_MISSING", "score": 0.8}],
-  ontology_hints_by_family: {...},
-  ...
-}
-### Target Evidence IR (per execution path, Step 3 output)
-
-EvidenceIRCluster {
-  path_id: "fw-update --mode usb",
-  path_definition: {
-    trigger: "user runs fw-update with --mode usb",
-    entry_points: ["main() → parse_args() → update_from_usb()"],
-    config_flags: ["CONFIG_USB_SUPPORT"],
+  id: "IR-001",
+  entrypoint: { function, file, line },
+  runtime_context: {
+    trigger_type: "command|config|callback|event|boot_phase|unknown",
+    trigger_ref:  "<short text from Step 2 verifier>",
+    config_flags: ["#ifdef flag if any"]
   },
-  members: [
-    {
-      function: "verify_signature",
-      guards_present: ["signature check against stored public key"],
-      guards_missing: ["old signature state not invalidated after verify"],
-      state_vars_touched: ["verify_result", "g_boot_state"],
-      state_vars_NOT_touched: ["g_current_signature"],
-      calls_within_path: ["hash_compute()", "crypto_compare()"],
-      called_by_within_path: ["update_from_usb()"],
-      confidence: "high",
-      uncertainty: "g_boot_state may be shared with network path via different initialization",
-      relevant_lines: [45, 48-62, 78],
-    },
-    // ... more functions in this path
+  path: {
+    nodes: [
+      { function, file, line, role: "entry|guard|sink|intermediate|unknown" }
+    ],
+    edges: [
+      { from: "<node>", to: "<node>",
+        kind: "call|dataflow|controlflow|callback|config|state|unknown" }
+    ]
+  },
+  conditions: {
+    required: ["preconditions for the path to fire (build flags, prior state, ...)"],
+    blocking: ["runtime conditions that, if added, would block the path",
+               "the would-be guard the fix introduces"]
+  },
+  evidence_anchors: [
+    { file, line_start, line_end, note: "<why this line matters>" }
   ],
-  call_graph_within_path: {...},
-  enforcement_landscape: {
-    guarded_actions: [{"action": "execute_image", "guard": "verify_signature", "strength": "partial"}],
-    unguarded_actions: [{"action": "rollback_to_previous", "guard": "none"}],
-  },
-  state_lifecycle: {
-    "g_boot_state": {"initialized_in": "main", "modified_in": ["verify_signature", "update_from_usb"], "checked_in": ["execute_image"]},
-  },
+  confidence: "high|medium|low",
+  uncertainty: "<text>"
 }
-### Critical difference
 
-The current IR captures "this function has a guard but doesn't enforce the result." The target IR captures "in this execution path, this function guards this action but leaves this state unmodified, which matters because another function in this path reads that state."
+### What this IR is — and what it isn't
 
-The latter is interprocedural, path-scoped, and includes negative evidence ("state_vars_NOT_touched", "guards_missing"). These require LLM reasoning over deterministic substrate — not mechanical pattern matching.
+The IR is a substrate-anchored chain summary: an entrypoint, the
+execution-path nodes Step 3 walked, the substrate edges between
+them, and a small audit packet (conditions, evidence_anchors).
+
+What it deliberately **omits** vs richer alternatives:
+
+- **No per-function negative evidence** (e.g. "state_vars_NOT_
+  touched", "guards_missing as separate field"). Negative
+  observations live in `conditions.blocking` as plain text — the
+  fix's would-be guard is named there. This collapses what could
+  be N orthogonal negative-evidence fields into one auditable
+  list.
+- **No per-function state-touched / state-not-touched matrix**.
+  Cross-function state interactions live as `kind: state` edges
+  in `path.edges` (between two co-readers/writers of the same
+  global, surfaced by Step 3's hybrid retrieval). The path-level
+  shape replaces a per-member state-vars matrix.
+- **No enforcement_landscape / state_lifecycle aggregates**.
+  Step 4 derives those when it weaves IRs; replicating them at
+  the IR level would be redundant.
+
+### Why lean is the right choice here
+
+- **One LLM call per IR** stays feasible. A richer member-level
+  schema (negative evidence per state variable, per-action
+  enforcement strength, cross-function state lifecycle) would
+  push the per-IR prompt past sensible token budgets on real
+  projects.
+- **Schema-vocabulary uniformity**. Every IR field maps to a
+  schema enum (`role`, `kind`, `trigger_type`) or a free-text
+  field with explicit file:line provenance. There is no third
+  vocabulary the dataset labelers have to learn.
+- **Hand-auditability**. Gold IRs in `datasets/<key>/gold/
+  evidence_irs.json` are produced by a human reading source
+  code; a lean schema is what they can produce reliably and what
+  the eval harness (`src/check_me/eval/step3_match.py`) can
+  match deterministically.
+- **Step 4 still has enough**. The chain (nodes + edges +
+  conditions + sink-role nodes' file:line citations) is what
+  Step 4 needs to weave exploit chains. Richer member-level
+  fields would not change Step 4's verdict on the validated
+  datasets (libssh, dnsmasq), which already recover gold sinks
+  using only this lean shape.
+
+### Critical invariants (enforced)
+
+- Every claim carries file:line provenance (via path.nodes' line
+  field and evidence_anchors).
+- Every IR has an explicit `entrypoint` and at least one entry-
+  role node.
+- `path.nodes[].role` and `path.edges[].kind` use the schema's
+  fixed enums (no free-form types).
+- `conditions.blocking` is the canonical place to record the
+  fix's missing guard, even when the vulnerable code lacks it.
 
 ---
 

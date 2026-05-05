@@ -35,6 +35,56 @@ Step 4: 선들을 엮어 도형     — 공격 시나리오
 - JSON schemas: [schemas/](./schemas/)
 - 데이터셋: [datasets/](./datasets/)
 
+## CLI
+
+`python -m check_me <subcommand>` — 6개 subcommand로 4-step 파이프라인 + 평가를 모두 커버.
+
+| Subcommand | 역할 | LLM |
+|---|---|---|
+| `step1` | Substrate 추출 (Step 1) | 없음 |
+| `regex-compare` | Clang vs regex 베이스라인 비교 (Stage 0 EC-1) | 없음 |
+| `step2` | Entrypoint mining + verification (Step 2) | miner + verifier |
+| `step3` | Evidence IR 합성 (Step 3) | per-IR synthesis |
+| `step4` | Attack scenario 합성 (Step 4) | single-call scenario synth |
+| `eval` | Gold vs 산출물 4-step 매칭 + `eval_report.json` (Stage 3) | step3/step4에 LLM judge |
+
+LLM-using subcommand들은 `CHECK_ME_LLM_*` env vars 또는 `.env`에서 provider/key/model을 읽음
+(자세한 내용은 [docs/LLM_CONFIG.md](./docs/LLM_CONFIG.md)).
+
+```bash
+# Stage 0 — substrate
+python -m check_me step1 \
+  --src datasets/libssh-CVE-2018-10933/source \
+  --project libssh --cve CVE-2018-10933 \
+  --out out/libssh-CVE-2018-10933/substrate.json
+
+# Stage 1 — entrypoints
+python -m check_me step2 \
+  --substrate out/libssh-CVE-2018-10933/substrate.json \
+  --out out/libssh-CVE-2018-10933/entrypoints.json
+
+# Stage 2 — evidence IRs + attack scenarios
+python -m check_me step3 \
+  --substrate out/libssh-CVE-2018-10933/substrate.json \
+  --entrypoints out/libssh-CVE-2018-10933/entrypoints.json \
+  --source datasets/libssh-CVE-2018-10933/source \
+  --out out/libssh-CVE-2018-10933/evidence_irs.json
+python -m check_me step4 \
+  --evidence-irs out/libssh-CVE-2018-10933/evidence_irs.json \
+  --source datasets/libssh-CVE-2018-10933/source \
+  --out out/libssh-CVE-2018-10933/attack_scenarios.json
+
+# Stage 3 — gold vs out 평가
+python -m check_me eval \
+  --gold datasets/libssh-CVE-2018-10933/gold \
+  --out-dir out/libssh-CVE-2018-10933 \
+  --report out/libssh-CVE-2018-10933/eval_report.json
+```
+
+`eval` subcommand는 모든 Stage 3 exit criteria (EC-1 \~ EC-4)를 통과하면 exit 0,
+하나라도 실패하면 exit 1. `--skip-step3` / `--skip-step4`로 LLM-judge 패스를 끄고
+deterministic Step 1 + Step 2 매칭만 빠르게 sanity check 가능.
+
 ## 현재 상태
 
 **4-step 파이프라인 모두 구현·검증 완료** (3 dataset 기준).
