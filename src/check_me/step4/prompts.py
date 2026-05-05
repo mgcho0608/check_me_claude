@@ -59,8 +59,31 @@ Hard constraints:
 
   - Reply with a single JSON object — no prose, no markdown
     fences. The object's ``attack_scenarios`` array can be
-    empty if you genuinely find no coherent scenario, but each
-    listed scenario MUST satisfy the schema.
+    empty only when the input contains no IR with a ``sink``
+    role node and no plausible cross-IR chain to a sink; in
+    every other case it must list at least one scenario.
+
+  - **Coverage rule (do not omit confident sinks).** Every IR
+    in the input that BOTH (a) has ``confidence`` of ``high``
+    or ``medium`` AND (b) contains a path node with
+    ``role: sink`` MUST appear as ``evidence_ir`` in at least
+    one scenario's ``exploit_chain``. The same IR may be
+    referenced by multiple scenarios (e.g. distinct exploit
+    paths that share a final sink); the requirement is that
+    no such IR is silently dropped from the output. If two
+    sink-bearing IRs share the same harmful operation but
+    differ in their attack surface (e.g. UDP vs TCP, server
+    vs client role, distinct entrypoint families), produce
+    a separate scenario for each — they represent different
+    attacker-controlled paths and downstream consumers may
+    treat them as independent vulnerabilities.
+
+    Low-confidence sink-bearing IRs may be omitted, and IRs
+    without a ``sink`` role node may be omitted (they have no
+    harmful operation to anchor a scenario). Use the
+    ``uncertainty`` field to record any IR you considered but
+    chose not to include and why.
+
   - ``exploit_chain.steps`` must have at least one step. Every
     step must include ``order``, ``evidence_ir`` (an IR id from
     the input), ``action`` (free text describing what the
