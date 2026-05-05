@@ -171,7 +171,7 @@ def match_scenarios(
     *,
     judge_client: Any,
     judge_config: Config,
-    top_k_candidates: int = 3,
+    top_k_candidates: int = 5,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> ScenarioReport:
     project = gold.get("project") or ours.get("project") or "<unknown>"

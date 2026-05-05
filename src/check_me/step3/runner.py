@@ -10,15 +10,16 @@ Produces ``evidence_irs.v1.json``: one IR per ``kept`` entrypoint.
 
 Resilience mirrors Step 2's runner:
 
-  - sequential dispatch (default ``max_workers=1``) so per-minute
-    provider quotas are not overrun
+  - parallel dispatch (default ``max_workers=4``) tuned for the
+    internal-LLM environment without per-minute quotas; drop to
+    1 (sequential) on public-cloud providers with tight quotas
   - each IR synthesis call is wrapped; on raised exception a
     synthetic IR is recorded with confidence=low and uncertainty
     naming the failure, so a single transient hiccup does not
     abort the whole run (PLAN Rule 4 / silent-delete-forbidden)
   - up to ``synth_retry_passes=2`` sequential retry passes with
-    a ``synth_retry_cooldown_sec=60`` cool-down between, letting
-    rate-limit windows refill.
+    a ``synth_retry_cooldown_sec=5`` cool-down between (was 60s
+    when we were pacing under public-cloud per-minute quotas).
 
 Quarantined entrypoints are NOT consumed by default (per CLAUDE.md
 "Step 3 default 입력은 status: kept 행"); set
@@ -107,9 +108,9 @@ def run(
     config: Config | None = None,
     client: Any | None = None,
     include_quarantined: bool = False,
-    max_workers: int = 1,
+    max_workers: int = 4,
     synth_retry_passes: int = 2,
-    synth_retry_cooldown_sec: float = 60.0,
+    synth_retry_cooldown_sec: float = 5.0,
     enable_escalation: bool = True,
     escalation_hop_depth: int = DEFAULT_HOP_DEPTH + 1,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,

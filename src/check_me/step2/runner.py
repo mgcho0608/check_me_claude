@@ -67,9 +67,9 @@ def run(
     verifier_client: Any | None = None,
     miner_chunk_size: int = miner_mod.DEFAULT_CHUNK_SIZE,
     miner_max_workers: int = miner_mod.DEFAULT_MAX_WORKERS,
-    verifier_max_workers: int = 1,
+    verifier_max_workers: int = 4,
     verifier_retry_passes: int = 2,
-    verifier_retry_cooldown_sec: float = 60.0,
+    verifier_retry_cooldown_sec: float = 5.0,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> tuple[dict[str, Any], RunReport]:
     """Run Step 2 end-to-end (lossless architecture).
@@ -96,13 +96,12 @@ def run(
     quarantine — never silent-deleted, audit trail preserved per
     PLAN Rule 4.
 
-    ``verifier_max_workers`` defaults to ``1`` (sequential):
-    candidate counts can be in the hundreds on stack-style C
-    codebases, and concurrent calls burst against per-minute
-    provider quotas. Sequential dispatch naturally paces under
-    quota; the retry passes handle transient hiccups.
-    ``miner_max_workers`` keeps the parallel default since chunk
-    counts are small (single-digit on typical projects).
+    ``verifier_max_workers`` defaults to ``4`` for the
+    internal-LLM environment without per-minute quotas. On
+    public-cloud providers with strict quotas (Gemini 2M/min
+    input tokens etc.) drop to 1 to pace under quota. Candidate
+    counts can run into the hundreds on stack-style C codebases
+    so the retry passes handle transient hiccups regardless.
 
     Configs and clients are optional — if not supplied, the runner
     loads them from the environment and constructs OpenAI SDK

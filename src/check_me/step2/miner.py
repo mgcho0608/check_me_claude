@@ -50,18 +50,17 @@ MIN_MINER_MAX_TOKENS = 16384
 # dataset-specific tuning.
 DEFAULT_CHUNK_SIZE = 30
 
-# Concurrent miner / verifier calls. The OpenAI SDK is thread-safe;
-# the Gemini OpenAI-compat surface enforces a per-minute input-token
-# quota (2M/min on gemini-3-flash at the time of writing).
+# Concurrent miner / verifier calls. The OpenAI SDK is thread-safe.
 #
-# Default 1 = sequential dispatch. The miner's per-chunk input
-# (full substrate slice + chunk-specific user message) can run
-# 100-200K tokens on stack-style C codebases; even 2 concurrent
-# chunks burst past the per-minute quota when the slice is large.
-# Sequential dispatch naturally paces under quota and works
-# reliably across all dataset sizes. Raise via the runner's
-# ``miner_max_workers`` kwarg if your provider's quota allows.
-DEFAULT_MAX_WORKERS = 1
+# Default tuned for the internal-LLM environment (no per-minute
+# input-token quota): 4 concurrent chunks. Public-cloud Gemini
+# users with strict per-minute quotas (e.g. 2M/min) should drop
+# this to 1 — see runner kwargs / env-var overrides. The previous
+# default was 1 (sequential) precisely because the miner's
+# per-chunk input can run 100-200K tokens on stack-style C
+# codebases and concurrent dispatch burst past public-cloud
+# quotas; the sweet spot is provider-dependent.
+DEFAULT_MAX_WORKERS = 4
 
 
 # Default temperature for miner calls. PLAN proposer/verifier split:
@@ -101,9 +100,9 @@ def mine(
     slice_: SubstrateSlice,
     *,
     max_retries: int = 2,
-    max_tokens_ceiling: int = 65536,
+    max_tokens_ceiling: int = 131072,
     min_max_tokens: int = MIN_MINER_MAX_TOKENS,
-    reasoning_effort: str | None = "minimal",
+    reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_MINER_TEMPERATURE,
     chunk: list[str] | None = None,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
@@ -151,9 +150,9 @@ def mine_chunked(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     max_workers: int = DEFAULT_MAX_WORKERS,
     max_retries: int = 2,
-    max_tokens_ceiling: int = 65536,
+    max_tokens_ceiling: int = 131072,
     min_max_tokens: int = MIN_MINER_MAX_TOKENS,
-    reasoning_effort: str | None = "minimal",
+    reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_MINER_TEMPERATURE,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> ChunkedMineResult:

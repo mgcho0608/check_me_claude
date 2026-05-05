@@ -158,7 +158,7 @@ def match_irs(
     *,
     judge_client: Any,
     judge_config: Config,
-    top_k_candidates: int = 3,
+    top_k_candidates: int = 5,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> IRReport:
     """Match each gold IR to the best candidate IR in ours by

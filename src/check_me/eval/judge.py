@@ -143,9 +143,9 @@ def judge_pair(
     gold: dict[str, Any],
     ours: dict[str, Any],
     max_retries: int = 2,
-    max_tokens_ceiling: int = 16384,
+    max_tokens_ceiling: int = 32768,
     min_max_tokens: int = MIN_JUDGE_MAX_TOKENS,
-    reasoning_effort: str | None = "minimal",
+    reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_JUDGE_TEMPERATURE,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:

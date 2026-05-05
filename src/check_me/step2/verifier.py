@@ -36,8 +36,8 @@ def verify_one(
     candidate: dict[str, Any],
     *,
     max_retries: int = 2,
-    max_tokens_ceiling: int = 16384,
-    reasoning_effort: str | None = "minimal",
+    max_tokens_ceiling: int = 32768,
+    reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_VERIFIER_TEMPERATURE,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:

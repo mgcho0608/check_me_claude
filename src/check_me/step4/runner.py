@@ -34,10 +34,12 @@ SCHEMA_VERSION = "v1"
 
 # Lines of source on each side of a sink-bearing line. The Step 4
 # LLM uses this excerpt to verify the harmful operation lives
-# where the IR claims and to pick the right sink_type. Shorter
-# than Step 3's full-function excerpt because Step 4 needs only
-# the immediate context of the sink line.
-DEFAULT_SINK_CONTEXT_LINES = 30
+# where the IR claims and to pick the right sink_type. Default
+# tuned for the internal-LLM environment — wider context helps
+# the LLM disambiguate sink_type (memory_write vs state_corruption
+# etc.) when the harmful operation is a few lines from the
+# function entry. Drop to ~30 on public cloud if budget tight.
+DEFAULT_SINK_CONTEXT_LINES = 80
 
 
 @dataclass
@@ -140,7 +142,7 @@ def run(
     synth_chunk_size: int = synth_mod.DEFAULT_CHUNK_SIZE,
     synth_max_workers: int = synth_mod.DEFAULT_MAX_WORKERS,
     synth_retry_passes: int = 2,
-    synth_retry_cooldown_sec: float = 60.0,
+    synth_retry_cooldown_sec: float = 5.0,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> tuple[dict[str, Any], Step4Report]:
     """Run Step 4 end-to-end on a single dataset's Step 3 output.

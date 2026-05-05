@@ -205,6 +205,7 @@ def test_runner_synthesis_failure_yields_synthetic_ir(tmp_path):
         entrypoints_path=paths["entrypoints"],
         source_root=paths["source"],
         config=_cfg(), client="stub", chat_fn=flaky_chat,
+        max_workers=1,  # test relies on sequential first-fails / second-succeeds
         synth_retry_passes=0,  # disable retry for this test
         synth_retry_cooldown_sec=0,
     )

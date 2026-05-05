@@ -53,8 +53,13 @@ DEFAULT_HOP_DEPTH = 2
 # substrate-relevance filter runs, so they trim the long tail of
 # weakly-connected nodes rather than dropping the candidate's
 # direct neighbourhood.
-DEFAULT_MAX_NODES = 120
-DEFAULT_MAX_STATE_NEIGHBOURS = 30
+# Defaults tuned for the internal-LLM environment without per-
+# minute quotas. Values are an empirical sweet spot — too large a
+# neighborhood dilutes LLM attention on long-context inputs, so we
+# raise but don't unbound. Drop both to ~120 / ~30 on public cloud
+# if input-token quotas matter.
+DEFAULT_MAX_NODES = 240
+DEFAULT_MAX_STATE_NEIGHBOURS = 50
 
 
 @dataclass(frozen=True)

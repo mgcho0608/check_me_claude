@@ -65,13 +65,12 @@ DEFAULT_SYNTH_TEMPERATURE: float = 0.0
 # headroom. Override via ``chunk_size`` kwarg.
 DEFAULT_CHUNK_SIZE = 15
 
-# Concurrent chunked-Step-4 calls. Step 2 chose 1 (sequential)
-# as the default for verifier dispatch because per-chunk inputs
-# can run 100-200K tokens on stack-style C codebases. Step 4's
-# per-chunk input is similar (full IR list + per-IR sink
-# excerpts), so the same conservative default applies. Raise
-# via ``max_workers`` when provider quotas allow.
-DEFAULT_MAX_WORKERS = 1
+# Concurrent chunked-Step-4 calls. Default 4 for the internal-LLM
+# environment without per-minute quotas. Per-chunk inputs run
+# 100-200K tokens on stack-style C codebases (full IR list +
+# per-IR sink excerpts) — public-cloud users on tight per-minute
+# input-token quotas should drop this to 1 sequential.
+DEFAULT_MAX_WORKERS = 4
 
 
 @dataclass
@@ -100,9 +99,9 @@ def synthesise_scenarios(
     chunk_index: int | None = None,
     chunk_total: int | None = None,
     max_retries: int = 2,
-    max_tokens_ceiling: int = 65536,
+    max_tokens_ceiling: int = 131072,
     min_max_tokens: int = MIN_SYNTH_MAX_TOKENS,
-    reasoning_effort: str | None = "minimal",
+    reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_SYNTH_TEMPERATURE,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:
@@ -152,9 +151,9 @@ def synthesise_scenarios_chunked(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     max_workers: int = DEFAULT_MAX_WORKERS,
     max_retries: int = 2,
-    max_tokens_ceiling: int = 65536,
+    max_tokens_ceiling: int = 131072,
     min_max_tokens: int = MIN_SYNTH_MAX_TOKENS,
-    reasoning_effort: str | None = "minimal",
+    reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_SYNTH_TEMPERATURE,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> ChunkedSynthResult:

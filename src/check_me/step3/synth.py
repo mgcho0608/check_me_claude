@@ -44,9 +44,9 @@ def synthesise_ir(
     project: str,
     cve: str,
     max_retries: int = 2,
-    max_tokens_ceiling: int = 65536,
+    max_tokens_ceiling: int = 131072,
     min_max_tokens: int = MIN_SYNTH_MAX_TOKENS,
-    reasoning_effort: str | None = "minimal",
+    reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_SYNTH_TEMPERATURE,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:

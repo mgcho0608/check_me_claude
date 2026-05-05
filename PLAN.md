@@ -781,11 +781,14 @@ This appendix tracks the implemented portion of the 4-step pipeline. Updated as 
 
 - Chunked miner with per-chunk failure fallback (one row per
   candidate_function — lossless propagation), `(function, file)`
-  dedup at merge, sequential default to stay under per-minute
-  provider quotas.
+  dedup at merge. Default `max_workers=4` for the internal-LLM
+  environment without per-minute quotas (drop to 1 sequential
+  on public-cloud providers with strict quotas — Gemini 2M/min
+  input tokens etc.).
 - Per-candidate verifier with synthetic-quarantine fallback +
-  sequential retry passes (default 2, with 60s cooldown) so a
-  single LLM hiccup doesn't kill the run.
+  retry passes (default 2, 5s cooldown — was 60s when pacing
+  under public-cloud quotas) so a single LLM hiccup doesn't
+  kill the run. Verifier `max_workers=4` matches miner posture.
 - Anchoring prevention: miner reasoning keys stripped before the
   verifier sees the candidate (`prompts.candidate_for_verifier`).
 - Verifier focused slice: 2-hop hybrid (call edges + shared global
@@ -852,6 +855,42 @@ Step 4 (`src/check_me/step4/`):
 
 Pytest total: 320+ all green. End-to-end gold recovery summary
 in the project README.
+
+### Default operating point — internal-LLM environment
+
+Defaults across Step 2/3/4 + eval judge are tuned for the
+internal-LLM environment (no per-minute quotas, deeper
+reasoning available):
+
+- `reasoning_effort = "high"` on every LLM call site (was
+  `"minimal"` — cuts per-call wall-clock, hurts deep reasoning
+  on IR/scenario synthesis).
+- `max_workers = 4` for chunked miner, verifier, Step 3 IR
+  synthesis, chunked Step 4 (was `1` sequential — public-cloud
+  rate-limit accommodation).
+- Retry cooldown `5s` (was `60s` — same rationale).
+- `max_tokens_ceiling = 131072` (was `65536`) for Step 2 miner /
+  Step 3 / Step 4 synthesis; `32768` for Step 2 verifier and
+  eval judge (smaller outputs).
+- Step 3 retrieval: `DEFAULT_MAX_NODES = 240`,
+  `DEFAULT_MAX_STATE_NEIGHBOURS = 50` (was `120` / `30`).
+- Step 4 sink excerpt: `DEFAULT_SINK_CONTEXT_LINES = 80` (was
+  `30`) — wider helps disambiguate `sink_type`.
+- Eval matchers: `top_k_candidates = 5` (was `3`) — picks more
+  partial matches for the LLM judge to evaluate.
+
+What was NOT raised (correctness/determinism, not budget):
+chunk_size (Step 2 miner = 30, Step 4 = 15) — small chunks are
+the lossless-propagation guarantee; raising re-introduces silent
+drops. Temperatures 0.0 (verifier/synth/judge) — determinism per
+PLAN Rule 2b. File-anchored seed in Step 3 retrieval —
+same-name C overload precision. Proposer/verifier instance
+separation — anchoring prevention. These stay regardless of
+quota.
+
+Public-cloud users with per-minute quotas should override via
+runner kwargs (or env vars where exposed) — drop max_workers to
+1, retry cooldown back to 60s — and accept the wall-clock cost.
 
 ### Resolved limitation — Step 4 selection at large IR scale
 
