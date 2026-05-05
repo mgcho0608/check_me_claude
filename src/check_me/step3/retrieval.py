@@ -53,7 +53,7 @@ DEFAULT_HOP_DEPTH = 2
 # substrate-relevance filter runs, so they trim the long tail of
 # weakly-connected nodes rather than dropping the candidate's
 # direct neighbourhood.
-DEFAULT_MAX_NODES = 60
+DEFAULT_MAX_NODES = 120
 DEFAULT_MAX_STATE_NEIGHBOURS = 30
 
 
@@ -190,6 +190,24 @@ def compute_neighborhood(
     call_graph: list[dict[str, Any]] = list(cats.get("call_graph", []))
     dcf: list[dict[str, Any]] = list(cats.get("data_control_flow", []))
 
+    # Build a function -> definition-file map. The call_graph's
+    # ``file`` field on an edge records the *call-site* file (the
+    # file containing the caller's body that issues the call), so
+    # for a callee that is defined in one file and called from many,
+    # naively recording the edge's file would point at a call site,
+    # not the callee's body. That breaks downstream code-excerpt
+    # extraction (libclang parses the wrong .c file looking for the
+    # callee's definition and finds nothing).
+    #
+    # Build the map by walking categories whose ``file`` does pin the
+    # function's body location: every call_graph row's ``caller``,
+    # and every ``function`` field in data_control_flow / guards /
+    # trust_boundaries / callback_registrations (where applicable).
+    # When multiple files are seen for a name (cross-TU same-name
+    # statics), the most common one wins — a deterministic tie
+    # break by the source order keeps the resolution stable.
+    func_def_files = _build_function_def_file_map(cats)
+
     # 1. Build the entry node.
     entry_node = NeighborhoodNode(
         function=entry_function,
@@ -205,6 +223,7 @@ def compute_neighborhood(
         seed_function=entry_function,
         seed_file=entry_file,
         hop_depth=hop_depth,
+        func_def_files=func_def_files,
     )
 
     # 3. Axis B — shared global state via def_use across the
@@ -250,7 +269,7 @@ def compute_neighborhood(
     #    far tail (high-hop / state-only) first and preserves the
     #    seed-adjacent chain. The seed itself has hop=0 and stays
     #    first.
-    nodes.sort(key=lambda n: (n.hop, n.file, n.function))
+    nodes.sort(key=lambda n: (n.hop, n.function, n.file))
 
     # 6. Cap.
     truncated = False
@@ -305,12 +324,66 @@ _CALL_KIND_MAP = {
 }
 
 
+def _build_function_def_file_map(
+    cats: dict[str, Any],
+) -> dict[str, str]:
+    """Build a map ``function name -> definition file`` from the
+    substrate. The mapping draws on every category whose ``file``
+    field pins the function's body location:
+
+      - ``call_graph[caller=X]``: the call-site is in X's body, so
+        the edge's file is X's file.
+      - ``data_control_flow[function=X]``, ``guards[function=X]``,
+        ``trust_boundaries[function=X]``,
+        ``callback_registrations[function=X]``: the file is the
+        function's body file (these categories record the function
+        whose body contains the row).
+
+    Notably we do NOT use ``call_graph[callee=X]`` (the file is
+    the call-site, not the callee's body) or
+    ``callback_registrations[callback_function=X]`` (the file is
+    the registration site, not the callback function's body).
+
+    When several files are recorded for a single name (cross-TU
+    same-name statics), the most-frequent file wins; ties broken
+    by sorted file order so the resolution is deterministic.
+    """
+    from collections import Counter
+
+    counts: dict[str, Counter[str]] = {}
+    def _bump(fn: object, file: object) -> None:
+        if not isinstance(fn, str) or not isinstance(file, str):
+            return
+        if fn not in counts:
+            counts[fn] = Counter()
+        counts[fn][file] += 1
+
+    for r in cats.get("call_graph", []):
+        _bump(r.get("caller"), r.get("file"))
+    for cat in (
+        "data_control_flow", "guards",
+        "trust_boundaries", "callback_registrations",
+    ):
+        for r in cats.get(cat, []):
+            _bump(r.get("function"), r.get("file"))
+
+    out: dict[str, str] = {}
+    for fn, c in counts.items():
+        # most_common returns ties in insertion order; sort by
+        # (-count, file) to make ties deterministic regardless of
+        # row order in the input.
+        ranked = sorted(c.items(), key=lambda p: (-p[1], p[0]))
+        out[fn] = ranked[0][0]
+    return out
+
+
 def _call_neighbourhood(
     call_graph: list[dict[str, Any]],
     *,
     seed_function: str,
     seed_file: str,
     hop_depth: int,
+    func_def_files: dict[str, str] | None = None,
 ) -> tuple[list[NeighborhoodNode], list[NeighborhoodEdge]]:
     """BFS the call_graph from the seed in both directions to
     ``hop_depth``. Seed-step outgoing edges are anchored to
@@ -327,6 +400,15 @@ def _call_neighbourhood(
     visited_hop: dict[str, int] = {seed_function: 0}
     edges_out: list[NeighborhoodEdge] = []
     frontier: set[str] = {seed_function}
+    fdef = func_def_files or {}
+
+    def _resolve_file(name: str, fallback: str | None) -> str | None:
+        """Prefer the substrate-derived definition file over the
+        call-site file an edge happens to carry. The fallback is
+        the edge's file (call-site location) — used only when the
+        function name doesn't appear in any category that pins its
+        definition file."""
+        return fdef.get(name, fallback)
 
     if hop_depth < 1:
         return [], []
@@ -351,7 +433,7 @@ def _call_neighbourhood(
             ))
             if callee not in visited:
                 next_frontier.add(callee)
-                visited_files.setdefault(callee, edge_file)
+                visited_files.setdefault(callee, _resolve_file(callee, edge_file))
                 visited_hop.setdefault(callee, 1)
         elif callee == seed_function:
             edges_out.append(NeighborhoodEdge(
@@ -360,7 +442,7 @@ def _call_neighbourhood(
             ))
             if caller not in visited:
                 next_frontier.add(caller)
-                visited_files.setdefault(caller, edge_file)
+                visited_files.setdefault(caller, _resolve_file(caller, edge_file))
                 visited_hop.setdefault(caller, 1)
     visited |= next_frontier
     frontier = next_frontier
@@ -383,7 +465,7 @@ def _call_neighbourhood(
                     file=edge_file, line=edge_line,
                 ))
                 nxt.add(callee)
-                visited_files.setdefault(callee, edge_file)
+                visited_files.setdefault(callee, _resolve_file(callee, edge_file))
                 visited_hop.setdefault(callee, hop_step)
             if callee in frontier and caller not in visited:
                 edges_out.append(NeighborhoodEdge(
@@ -391,7 +473,7 @@ def _call_neighbourhood(
                     file=edge_file, line=edge_line,
                 ))
                 nxt.add(caller)
-                visited_files.setdefault(caller, edge_file)
+                visited_files.setdefault(caller, _resolve_file(caller, edge_file))
                 visited_hop.setdefault(caller, hop_step)
             # Edges between two already-visited nodes (excluding the
             # seed; its edges were emitted in hop 1) describe the
