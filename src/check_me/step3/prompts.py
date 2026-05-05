@@ -64,42 +64,10 @@ PART A — Path nodes.
         * "intermediate" — function the path passes through,
         * "guard"        — node whose IfStmt / SwitchStmt gates the
                             path (e.g. ``if (state != AUTH) return``),
-        * "sink"          — RESERVED. Use only for a node that is
-                            actually a security sink: a line that
-                            performs the attacker-relevant
-                            harmful operation. Concrete examples:
-                            unconditional write to security state
-                            (``session->session_state = AUTHED``),
-                            OOB memory read or write
-                            (``buf[attacker_idx]``), free-with-
-                            attacker-owned-pointer, command
-                            execution (``system(input)``),
-                            length confusion that leaks bytes,
-                            assertion / abort on attacker-shaped
-                            input. Do NOT label the line as
-                            ``sink`` merely because the IR's
-                            visible neighborhood ends there
-                            (e.g. an indirect-callback dispatch
-                            site whose target is decided by a
-                            registered handler table — that line
-                            is a *dispatch boundary*, not a sink).
-
-  Boundary handling. If your retrieval neighborhood cannot reach
-  a real sink (the chain's terminal harmful operation lives more
-  than 2 hops away, or behind an indirect dispatch this IR
-  cannot resolve), DO NOT promote the last reachable node to
-  ``sink``. Instead:
-
-    1. Keep that node's ``role`` as ``intermediate`` (or
-       ``guard`` when applicable),
-    2. In ``uncertainty``, explicitly state that the chain
-       continues beyond this IR's visible neighborhood and name
-       the next entrypoint(s) the chain could plausibly thread
-       through — typically a function in
-       ``callback_registrations`` or a function the indirect
-       dispatch resolves into. This signal lets the downstream
-       Step 4 weave this IR with a sibling IR rooted at that
-       continuation point.
+        * "sink"          — node where the bug fires (data corruption,
+                            authentication bypass, OOB write/read,
+                            assertion of attacker-controlled
+                            state, command injection, etc.).
 
   Multiple lines of the same function may appear as separate
   nodes when distinct lines play distinct roles (e.g. one
