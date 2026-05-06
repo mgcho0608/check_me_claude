@@ -67,6 +67,8 @@ def run(
     verifier_client: Any | None = None,
     miner_chunk_size: int = miner_mod.DEFAULT_CHUNK_SIZE,
     miner_max_workers: int = miner_mod.DEFAULT_MAX_WORKERS,
+    miner_use_chunk_focused_slice: bool = True,
+    miner_chunk_hop_depth: int = 2,
     verifier_max_workers: int = 4,
     verifier_retry_passes: int = 2,
     verifier_retry_cooldown_sec: float = 5.0,
@@ -139,6 +141,8 @@ def run(
         slice_=slice_,
         chunk_size=miner_chunk_size,
         max_workers=miner_max_workers,
+        use_chunk_focused_slice=miner_use_chunk_focused_slice,
+        chunk_hop_depth=miner_chunk_hop_depth,
         chat_fn=chat_fn,
     )
     proposed: list[dict[str, Any]] = miner_result.parsed.get("candidates", [])

@@ -30,7 +30,7 @@ from ..llm.client import ChatRequest, ChatResponse, chat
 from ..llm.config import Config
 from ..llm.json_call import chat_json, CallResult
 from .prompts import MINER_OUTPUT_SCHEMA, build_miner_messages
-from .substrate_slice import SubstrateSlice
+from .substrate_slice import SubstrateSlice, slice_for_candidate_chunk
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,8 @@ def mine_chunked(
     min_max_tokens: int = MIN_MINER_MAX_TOKENS,
     reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_MINER_TEMPERATURE,
+    use_chunk_focused_slice: bool = True,
+    chunk_hop_depth: int = 2,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> ChunkedMineResult:
     """Run the miner over fixed-size chunks of the candidate list,
@@ -194,13 +196,31 @@ def mine_chunked(
         chunks still produce candidates and the run completes
         instead of aborting on a single transient hiccup. PLAN
         Rule 4: silent delete is forbidden — the per-chunk
-        diagnostic records the error so the operator can re-run."""
+        diagnostic records the error so the operator can re-run.
+
+        The slice handed to ``mine`` is chunk-focused by default
+        (per-chunk projection over the full slice via
+        :func:`slice_for_candidate_chunk`) so the per-call prompt
+        stays under the model's context window on large projects.
+        Set ``use_chunk_focused_slice=False`` on
+        :func:`mine_chunked` to revert to the pre-projection
+        behaviour — see PLAN.md Appendix A "Known risk: chunk
+        slice scoping" for when this escape hatch is appropriate.
+        """
         t0 = _time.monotonic()
+        if use_chunk_focused_slice:
+            chunk_slice = slice_for_candidate_chunk(
+                slice_,
+                chunk_candidates=chunk,
+                hop_depth=chunk_hop_depth,
+            )
+        else:
+            chunk_slice = slice_
         try:
             result = mine(
                 client=client,
                 config=config,
-                slice_=slice_,
+                slice_=chunk_slice,
                 chunk=chunk,
                 max_retries=max_retries,
                 max_tokens_ceiling=max_tokens_ceiling,

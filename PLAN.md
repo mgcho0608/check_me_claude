@@ -856,6 +856,73 @@ Step 4 (`src/check_me/step4/`):
 Pytest total: 320+ all green. End-to-end gold recovery summary
 in the project README.
 
+### Known risk: chunk slice scoping (Step 2 chunked miner)
+
+(Added when introducing `slice_for_candidate_chunk` to fix
+context-window overflow on large substrate slices.)
+
+**The mitigation in place.** `mine_chunked` (default-on)
+projects the full slice down to a chunk-focused slice via
+`slice_for_candidate_chunk`. The projection preserves Part B's
+discovery vocabulary fully — `callback_registrations`,
+`trust_boundaries`, `config_mode_command_triggers`, indirect
+call_graph edges originating from chunk candidates — and scopes
+the bulk: direct `call_graph` edges, `guards`, `evidence_anchors`
+to the chunk's hop_depth=2 neighbourhood (matches the verifier's
+`slice_for_candidate` posture, so both halves of Step 2 use the
+same N=2 retrieval depth).
+
+**The risk that remains.** The 2-hop neighbourhood centred on a
+chunk's assigned candidates can still be *too narrow* on
+projects whose entrypoints are reached only by deeper indirect
+chains — e.g. a candidate is dispatched into from a `main_loop`
+function whose body sits 3+ call hops away. In that shape:
+
+- Part B's indexed-dispatch vocabulary is unaffected (full
+  callback_registrations + indirect edges always visible),
+- but Part A's per-candidate reachability + attacker-
+  controllability reasoning over `call_graph[kind=direct]`
+  could miss the main-loop hand-off, leading the miner to flag
+  `confidence: low` where the un-projected miner would have
+  produced `confidence: medium/high`.
+
+The verifier always sees a per-candidate 2-hop slice and is
+unaffected; downstream Step 3 / Step 4 still get the kept
+candidates either way. So the worst-case symptom is a
+quarantine bias, not gold loss.
+
+**Symptom to watch for** (from a run report):
+
+> "candidate is in the chunked-miner output with `confidence:
+> low` even though its 2-hop verifier slice clearly establishes
+> reachability + controllability"
+
+This is the diagnostic signal that the projection is too
+narrow for the project at hand.
+
+**Escape hatches.**
+
+1. `mine_chunked(..., chunk_hop_depth=3)` — raise the projection
+   depth from 2 to 3 (or higher). Same principle as Step 3
+   N=2→N=3 escalation. Generic, project-agnostic. CLI flag:
+   `--chunk-hop-depth 3`.
+2. `mine_chunked(..., use_chunk_focused_slice=False)` — disable
+   the projection entirely; revert to the un-projected
+   behaviour. Use only when option (1) is insufficient AND the
+   project's substrate fits the model context without
+   projection (e.g. on a model with a much larger context
+   window). CLI flag: `--no-chunk-focused-slice`.
+
+The escape hatches are wired through both the runner and the
+CLI so a fix can be applied per-project without code changes.
+
+**Future generalisation path.** If a project regularly needs
+hop_depth=3 for the chunked miner AND verifier, that's the
+signal to revisit Step 3 escalation defaults too — they should
+move in lockstep. The principle is "same N across miner-chunk-
+projection and verifier-per-candidate-projection", per PLAN
+§3 retrieval policy.
+
 ### Default operating point — internal-LLM environment
 
 Defaults across Step 2/3/4 + eval judge are tuned for the

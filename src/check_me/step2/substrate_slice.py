@@ -522,3 +522,189 @@ def slice_for_candidate(
         guards=guards,
         evidence_anchors=anchors,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Per-chunk focusing (chunked miner)
+# --------------------------------------------------------------------------- #
+
+
+def slice_for_candidate_chunk(
+    full: SubstrateSlice,
+    *,
+    chunk_candidates: list[str],
+    hop_depth: int = 2,
+) -> SubstrateSlice:
+    """Build a chunk-focused projection of ``full`` for the chunked
+    miner — generalises :func:`slice_for_candidate` from one
+    candidate (verifier) to a chunk's N assigned candidates (miner).
+
+    Why this exists. On large C codebases the full
+    :class:`SubstrateSlice` (typical ~1500 call_graph edges + ~900
+    callback_registrations + 400 each of guards / anchors / config
+    triggers) can run 100-200K LLM tokens before the chunk's
+    user-message is added. With ``reasoning_effort: "high"`` and
+    visible-output reservation, this exceeds the input budget on
+    smaller-context internal models (~262K). Without scoping,
+    every per-chunk call rejects with a context-length error and
+    the chunked miner cannot run at all on such projects.
+
+    Scoping rules. The projection preserves what each Part of the
+    miner prompt actually needs:
+
+      Part A — per-candidate enumeration. The miner needs
+      substrate evidence about each assigned candidate's
+      reachability and attacker-controllability. The candidate's
+      own neighbourhood (call edges + guards + anchors in the
+      candidate's files) is what the miner reasons over. Other
+      candidates' neighbourhoods are not required for Part A.
+
+      Part B — cross-chunk discovery (indexed-dispatch pattern).
+      The miner is told to recognise a function appearing as
+      ``caller`` of ``call_graph[kind=indirect]`` edges whose
+      ``callee`` set overlaps with ``callback_registrations``.
+      So Part B's discovery vocabulary is:
+        - all callback_registrations rows (the registered handler
+          set), because Part B's claim is "is the callee
+          registered as a callback elsewhere?",
+        - all indirect call_graph edges originating from any
+          chunk-assigned candidate (the dispatch evidence
+          itself),
+        - all trust_boundaries (cross-cutting attacker-input
+          surface; small),
+        - all config_mode_command_triggers (mode/CLI gates;
+          small).
+      These four are kept FULL regardless of chunk membership.
+
+      Bulk reduction comes from scoping ``call_graph[kind=direct]``,
+      ``guards`` and ``evidence_anchors`` to the chunk's ``hop_depth``-
+      neighbourhood (union of each candidate's BFS over the call
+      graph). On contiki-class projects this is the 95% of the
+      slice mass that gets trimmed; on libssh-class projects the
+      neighbourhood is most of the graph anyway and the projection
+      is a no-op-ish 5-10% reduction.
+
+    Project-agnostic. Walks substrate fields the schema defines —
+    no project-name or symbol-pattern branching. The same rule
+    runs unchanged on any C codebase.
+
+    Potential risk (documented; see PLAN.md Appendix A).
+    Aggressively scoping ``call_graph[kind=direct]`` and
+    ``guards`` CAN hide cross-cutting context — e.g. a candidate
+    is reached only via a direct call from a ``main_loop`` whose
+    own body is several hops away. The verifier (one candidate
+    at a time, 2-hop hybrid retrieval) is unaffected — the
+    per-candidate slice still walks the full call graph. But the
+    chunked miner's Part A reasoning could degrade for such
+    cases. **Escape hatch:** ``mine_chunked(...,
+    use_chunk_focused_slice=False)`` reverts to the un-projected
+    behaviour; useful when a project's miner verdict quality is
+    suspected to suffer from over-aggressive scoping. If a future
+    project hits this, the symptom is "candidate kept by verifier
+    on its 2-hop slice but never proposed by miner because Part
+    A claimed insufficient evidence" — that's the signal to
+    disable the projection for that project.
+    """
+    chunk_set = set(chunk_candidates)
+    if not chunk_set:
+        return full
+
+    # Build the hop-depth neighbourhood as the union of each
+    # candidate's BFS. seed_file is None at the chunk level — the
+    # chunk has many files; per-candidate seed-file disambiguation
+    # is the verifier's job. Name-only is acceptable here because
+    # any same-name C overload pulled in is filtered downstream by
+    # the per-candidate verifier slice.
+    neighborhood: set[str] = set(chunk_set)
+    for cand in chunk_set:
+        neighborhood |= _call_neighborhood(
+            full,
+            seed_function=cand,
+            seed_file=None,
+            hop_depth=hop_depth,
+        )
+
+    # ---- Part B vocabulary (kept FULL) ---------------------------
+    # 1. Indirect call_graph edges originating from chunk
+    #    candidates — these ARE the dispatch evidence Part B looks at.
+    indirect_from_chunk = [
+        e for e in full.call_graph
+        if e.get("kind") == "indirect" and e.get("caller") in chunk_set
+    ]
+    indirect_callees: set[str] = {
+        e.get("callee") for e in indirect_from_chunk
+        if isinstance(e.get("callee"), str)
+    }
+
+    # 2. callback_registrations: keep rows whose handler or
+    #    registration site touches the chunk OR Part B's discovery
+    #    set. This preserves the dispatch vocabulary while dropping
+    #    rows that are entirely off-chunk (a key reduction on
+    #    projects with hundreds of unrelated callbacks).
+    chunk_callbacks: list[dict[str, Any]] = []
+    for c in full.callback_registrations:
+        cb = c.get("callback_function")
+        fn = c.get("function")
+        if (
+            (isinstance(cb, str) and (cb in neighborhood or cb in indirect_callees or cb in chunk_set))
+            or (isinstance(fn, str) and (fn in neighborhood or fn in chunk_set))
+        ):
+            chunk_callbacks.append(c)
+
+    # 3. trust_boundaries — kept FULL. Cross-cutting attacker-input
+    #    surface; in practice small (tens-to-low-hundreds rows).
+    trust = list(full.trust_boundaries)
+
+    # 4. config_mode_command_triggers — kept FULL. Mode/CLI gates;
+    #    cross-cutting and pre-capped at slice_substrate level.
+    cfg = list(full.config_mode_command_triggers)
+
+    # ---- Bulk reduction (scoped) ---------------------------------
+    # Direct call_graph edges scoped to chunk neighbourhood. Indirect
+    # edges from chunk candidates are merged in (dedup by id) so
+    # Part B sees its evidence regardless of whether the indirect
+    # endpoint is in the neighbourhood.
+    direct_edges = [
+        e for e in full.call_graph
+        if e.get("kind") != "indirect"
+        and (e.get("caller") in neighborhood or e.get("callee") in neighborhood)
+    ]
+    seen_edge_ids: set[int] = set()
+    chunk_edges: list[dict[str, Any]] = []
+    for e in indirect_from_chunk + direct_edges:
+        if id(e) in seen_edge_ids:
+            continue
+        seen_edge_ids.add(id(e))
+        chunk_edges.append(e)
+
+    guards = [g for g in full.guards if g.get("function") in neighborhood]
+
+    # evidence_anchors scoped by file — files containing any
+    # neighbourhood-relevant row (trust + callbacks + edges +
+    # guards). Same rule as slice_substrate's relevant_files
+    # filter, applied at chunk granularity.
+    relevant_files: set[str] = set()
+    for r in trust + chunk_callbacks + chunk_edges + guards:
+        f = r.get("file")
+        if isinstance(f, str):
+            relevant_files.add(f)
+    anchors = [
+        a for a in full.evidence_anchors
+        if a.get("file") in relevant_files
+    ]
+
+    return SubstrateSlice(
+        project=full.project,
+        cve=full.cve,
+        # Keep the FULL candidate_functions list visible — Part B
+        # may discover entrypoints outside the chunk's assigned
+        # subset, and the user message's chunk_block already
+        # delimits the chunk's per-Part-A responsibility.
+        candidate_functions=list(full.candidate_functions),
+        trust_boundaries=trust,
+        callback_registrations=chunk_callbacks,
+        config_mode_command_triggers=cfg,
+        call_graph=chunk_edges,
+        guards=guards,
+        evidence_anchors=anchors,
+    )

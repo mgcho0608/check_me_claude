@@ -259,6 +259,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     p3.add_argument("--substrate", required=True, help="path to a step1 substrate JSON")
     p3.add_argument("--out", required=True, help="output path for entrypoints.json")
+    p3.add_argument(
+        "--no-chunk-focused-slice",
+        action="store_true",
+        help=(
+            "Disable per-chunk substrate-slice projection. By default the"
+            " chunked miner projects the full slice down to the chunk's"
+            " 2-hop neighbourhood (preserves Part B vocabulary —"
+            " callback_registrations / trust_boundaries / indirect call"
+            " edges from chunk candidates / config_triggers — and scopes"
+            " the bulk: direct call edges, guards, evidence_anchors)."
+            " The escape hatch reverts to the un-projected behaviour for"
+            " projects where Part A reasoning needs more cross-cutting"
+            " context than the 2-hop neighbourhood provides — see"
+            " PLAN.md Appendix A 'Known risk: chunk slice scoping'."
+        ),
+    )
+    p3.add_argument(
+        "--chunk-hop-depth",
+        type=int,
+        default=2,
+        help=(
+            "Hop depth for the per-chunk substrate-slice projection"
+            " (default: 2 — matches verifier slice_for_candidate posture)."
+        ),
+    )
     p3.set_defaults(func=_step2)
 
     p4 = sub.add_parser(
@@ -399,7 +424,11 @@ def _step2(args: argparse.Namespace) -> int:
         print(f"error: --substrate not found: {substrate_path}", file=sys.stderr)
         return 2
     substrate = json.loads(substrate_path.read_text())
-    output, report = step2_runner.run(substrate)
+    output, report = step2_runner.run(
+        substrate,
+        miner_use_chunk_focused_slice=not args.no_chunk_focused_slice,
+        miner_chunk_hop_depth=args.chunk_hop_depth,
+    )
     out_path = Path(args.out)
     step2_runner.write_entrypoints(output, out_path)
     print(
