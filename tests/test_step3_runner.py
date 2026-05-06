@@ -263,3 +263,71 @@ def test_runner_validates_against_evidence_irs_schema(tmp_path):
         config=_cfg(), client="stub", chat_fn=seq,
     )
     jsonschema.validate(out, schema)
+
+
+def test_demote_unanchored_sinks_demotes_line_zero():
+    """An IR whose sink-role node has ``line: 0`` violates the
+    Step 3 prompt rule "sink role REQUIRES a real harmful-
+    operation line". The runner enforces this server-side by
+    demoting such nodes to ``intermediate`` so downstream Step 4
+    sees the chain end honestly. Project-agnostic — generic
+    schema-level rule."""
+    ir = {
+        "id": "IR-tmp",
+        "path": {
+            "nodes": [
+                {"function": "entry_fn", "file": "x.c", "line": 10, "role": "entry"},
+                # libssh-style — function in neighborhood but body
+                # absent; LLM placed sink with line=0.
+                {"function": "ssh_packet_userauth_success", "file": "auth.c", "line": 0, "role": "sink"},
+            ],
+            "edges": [],
+        },
+        "uncertainty": "body absent from excerpts",
+    }
+    demoted = runner_mod._demote_unanchored_sinks(ir)
+    assert demoted == ["ssh_packet_userauth_success"]
+    sink_node = ir["path"]["nodes"][1]
+    assert sink_node["role"] == "intermediate"
+    # Original uncertainty preserved + warning appended.
+    assert "body absent from excerpts" in ir["uncertainty"]
+    assert "ssh_packet_userauth_success" in ir["uncertainty"]
+    assert "demoted" in ir["uncertainty"].lower()
+
+
+def test_demote_unanchored_sinks_demotes_line_null():
+    ir = {
+        "id": "IR-tmp",
+        "path": {
+            "nodes": [
+                {"function": "entry_fn", "file": "x.c", "line": 1, "role": "entry"},
+                {"function": "vuln", "file": "y.c", "line": None, "role": "sink"},
+            ],
+            "edges": [],
+        },
+    }
+    demoted = runner_mod._demote_unanchored_sinks(ir)
+    assert demoted == ["vuln"]
+    assert ir["path"]["nodes"][1]["role"] == "intermediate"
+
+
+def test_demote_unanchored_sinks_keeps_anchored_sinks_intact():
+    """Negative — a sink role with a valid positive integer line
+    must NOT be demoted. Otherwise the rule would null out
+    legitimate IRs."""
+    ir = {
+        "id": "IR-tmp",
+        "path": {
+            "nodes": [
+                {"function": "entry_fn", "file": "x.c", "line": 1, "role": "entry"},
+                {"function": "real_sink", "file": "y.c", "line": 287, "role": "sink"},
+            ],
+            "edges": [],
+        },
+        "uncertainty": "",
+    }
+    demoted = runner_mod._demote_unanchored_sinks(ir)
+    assert demoted == []
+    assert ir["path"]["nodes"][1]["role"] == "sink"
+    # Untouched uncertainty.
+    assert ir.get("uncertainty") == ""

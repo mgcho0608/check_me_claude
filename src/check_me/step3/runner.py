@@ -58,6 +58,46 @@ class Step3Report:
     elapsed_sec: float = 0.0
 
 
+def _demote_unanchored_sinks(ir: dict[str, Any]) -> list[str]:
+    """Enforce the prompt-side rule "sink role REQUIRES a real
+    non-zero, non-null line" by demoting violating sinks to
+    ``intermediate`` and appending a structured warning to the
+    IR's ``uncertainty``.
+
+    Returns the list of demoted node identifiers (function names,
+    or ``"<unnamed>"`` for nameless nodes) for diagnostic
+    reporting.
+
+    Project-agnostic: walks the schema's ``path.nodes`` and the
+    enum value ``"sink"``; no project-name or symbol-pattern
+    branching. The rule is that a sink is unusable for downstream
+    Step 4 chain synthesis without a real harmful-operation line
+    citation, regardless of which CVE produced the IR. Honest
+    intermediate-only output is strictly more useful than a
+    fabricated ``line: 0`` sink."""
+    nodes = (ir.get("path") or {}).get("nodes") or []
+    demoted: list[str] = []
+    for n in nodes:
+        if n.get("role") != "sink":
+            continue
+        line = n.get("line")
+        if line is None or (isinstance(line, int) and line <= 0):
+            n["role"] = "intermediate"
+            demoted.append(n.get("function") or "<unnamed>")
+    if demoted:
+        warn = (
+            "Sink role demoted to intermediate on node(s) "
+            f"{demoted} because line was 0/null — no honest "
+            "harmful-operation line citation. Step 4 chain "
+            "synthesis should treat this IR as ending at an "
+            "intermediate frame and weave with another IR rooted "
+            "closer to the actual sink."
+        )
+        existing = ir.get("uncertainty") or ""
+        ir["uncertainty"] = (existing + ("\n" if existing else "") + warn)[:1500]
+    return demoted
+
+
 def _synthetic_unverified_ir(
     *, entrypoint: dict[str, Any], error_text: str,
 ) -> dict[str, Any]:
@@ -251,6 +291,17 @@ def run(
             # Strip the meta-signal so the persisted IR conforms
             # cleanly to the on-disk schema.
             ir_parsed.pop("needs_more_context", None)
+            # Prompt-side rule says: sink role REQUIRES a non-zero,
+            # non-null ``line`` (the actual harmful operation line).
+            # Runner-side enforcement in case the LLM ignores it:
+            # demote any sink-role node with line=0 or line=null
+            # to ``intermediate`` and surface a structured warning
+            # in ``uncertainty``. PLAN Rule 4 / silent-delete-
+            # forbidden — we don't drop the node, we relabel it
+            # so downstream Step 4 sees the chain end honestly.
+            demoted = _demote_unanchored_sinks(ir_parsed)
+            if demoted:
+                info["unanchored_sinks_demoted"] = demoted
             elapsed = time.monotonic() - t0
             _done["n"] += 1
             sink_count = sum(

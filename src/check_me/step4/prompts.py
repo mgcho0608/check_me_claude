@@ -91,6 +91,44 @@ Hard constraints:
     Use the ``uncertainty`` field to record any IR you
     considered but chose not to make primary and why.
 
+  - **Multi-IR weave is the canonical case.** An exploit chain
+    that references the SAME ``evidence_ir`` id at every step
+    is almost always a sign the chain is incomplete. Real
+    exploits cross IR boundaries: an entrypoint IR rooted at
+    the network surface (e.g. a packet read or socket
+    callback) ends with the chain dispatched into a handler;
+    the handler's IR (rooted at the dispatched function) picks
+    up the chain and reaches the sink. When the input contains
+    one IR with the *attacker entry* and another IR with the
+    *harmful operation* on the same global state or shared
+    buffer, your scenario's ``exploit_chain.steps`` SHOULD
+    weave them — order=1 references the entry-side IR,
+    order=2+ references the sink-side IR. Look for these
+    weaves explicitly when you start a scenario:
+
+      (a) IR A's ``path.nodes`` ends with ``role:
+          intermediate`` whose ``function`` is ALSO present
+          in IR B's ``entrypoint`` field — direct dispatch
+          weave.
+      (b) IR A and IR B share at least one node function
+          name or one ``conditions.required`` reference to
+          the same global state — state-axis weave.
+      (c) IR A's ``runtime_context.trigger_type`` is
+          ``callback`` / ``event`` (network-driven) AND
+          IR B's path contains a ``role: sink`` node — a
+          natural attacker-input → harmful-operation pair.
+
+    A 4-step chain whose ``evidence_ir`` field is the same id
+    four times is a SINGLE-IR scenario merely re-numbered as
+    multiple steps; this hides path information rather than
+    revealing it. Either:
+      - weave with another IR (cross-IR ids in steps), OR
+      - collapse to a single-step scenario whose ``action``
+        and ``result`` describe the chain end-to-end inside
+        that one IR.
+    The ``uncertainty`` field should note when you tried to
+    weave and could not find a partner IR.
+
   - ``exploit_chain.steps`` must have at least one step. Every
     step must include ``order``, ``evidence_ir`` (an IR id from
     the input), ``action`` (free text describing what the

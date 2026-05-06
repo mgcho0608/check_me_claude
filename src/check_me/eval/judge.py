@@ -53,39 +53,74 @@ artefact of the same kind, both for the same project + CVE. Your
 task: judge whether the two describe the same underlying
 vulnerability or execution path.
 
-Verdicts:
+Verdicts (apply the rubric BEFORE writing the verdict — the
+rubric's quantitative criteria override loose intuition):
 
-  - "same"      — the two artefacts describe the same execution
-                   path / same vulnerability. Minor differences
-                   in line numbers, intermediate function picks,
-                   or wording are tolerated as long as the
-                   structural skeleton is the same: same entry
-                   point family (callback / event / command /
-                   config trigger), same sink concept, same
-                   harmful operation.
-  - "partial"   — overlap exists (same entry family OR same
-                   sink, but not both; or the path covers part
-                   of the gold chain but stops short of the
-                   gold sink). State which aspect matches and
-                   which diverges in ``matched_aspects`` /
-                   ``diverging_aspects``.
+  - "same"      — ALL of the following hold:
+                  (a) same entry-point family AND attack
+                      surface (e.g. both are server-side UDP
+                      DNS receive; client-side TCP is NOT the
+                      same surface as server-side UDP even if
+                      both reach the same sink),
+                  (b) same sink: ``sink.function`` matches
+                      AND ``sink.file`` matches AND
+                      ``sink.line`` is within ±5 lines of
+                      gold's (a tighter window than "anywhere
+                      in the same function"),
+                  (c) same harmful operation category
+                      (memory_write vs memory_read vs
+                      auth_bypass vs state_corruption — these
+                      are NOT interchangeable),
+                  (d) same impact category and exploitability
+                      tier (high/medium/low — within one tier
+                      is OK, but ``unproven`` vs ``high`` is
+                      NOT same).
+
+  - "partial"   — overlap exists but at least one of (a)/(b)/
+                  (c)/(d) above fails. The most common partial
+                  shape: gold and ours share the same sink
+                  function but reach it from different attack
+                  surfaces (e.g. UDP vs TCP variant of the
+                  same CVE), or share the same entry surface
+                  but ours stops at an intermediate frame
+                  before the gold sink. State the failed
+                  axis explicitly in ``diverging_aspects`` —
+                  e.g. ``"sink.line off by 217 (gold:1082,
+                  ours:1065 — function start, not harmful op)"``,
+                  ``"attack surface differs: gold UDP, ours
+                  TCP"``, ``"sink_type differs: gold
+                  memory_write, ours state_corruption"``.
+
   - "different" — the two artefacts describe distinct
-                   vulnerabilities or unrelated execution paths.
+                   vulnerabilities or unrelated execution paths
+                   (different sink function, different impact
+                   category, or chains that share only a
+                   high-level CVE label but no concrete code
+                   path).
 
 Output a single JSON object with verdict + confidence
 (high/medium/low) + free-text reason. Optionally list specific
-matched_aspects and diverging_aspects as short bullets.
+matched_aspects and diverging_aspects as short bullets — but
+when verdict is ``partial``, ``diverging_aspects`` is REQUIRED
+(a partial verdict without a concrete diverging axis is the
+hand-wave the rubric is designed to prevent).
 
 Hard constraints:
 
   - Reply with ONE JSON object only — no prose, no markdown.
   - Do not invent details. Reason only from the two artefacts
     you were given.
-  - Do not penalise wording differences if the structural
-    skeleton matches. The pipeline's LLM may pick a different
-    intermediate function on the same chain or cite a sink line
-    that's a few lines away from gold's; treat those as "same"
-    when the chain otherwise aligns.
+  - Do NOT collapse different attack surfaces (UDP vs TCP,
+    server vs client, network vs local) into ``same`` even
+    when the sink function matches — the attack surface IS
+    part of the vulnerability identity. Use ``partial`` and
+    name the surface difference in ``diverging_aspects``.
+  - Do NOT verdict ``same`` when ``sink.line`` is more than
+    ±5 lines from gold's, or when gold's sink line is a real
+    integer and ours is ``0``/``null`` (an unanchored sink is
+    NOT the same as an anchored one — the line citation IS
+    part of the artefact's identity for downstream
+    consumers).
   - Do not use dataset-specific knowledge.
 """
 

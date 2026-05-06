@@ -89,6 +89,35 @@ PART A — Path nodes.
   is in your input; staying at the caller's line is conservative
   and loses precision.
 
+  CRITICAL — sink role REQUIRES a real harmful-operation line.
+  A node with ``role: "sink"`` MUST have a non-zero, non-null
+  ``line`` field that points to the EXACT source line where the
+  harmful operation happens (the unbounded write statement, the
+  unguarded dereference, the auth-state assignment, the command
+  exec call, etc.). Setting ``line: 0`` or ``line: null`` on a
+  sink role is FORBIDDEN — it is not a valid sink anchor; it
+  is a "I named a function but cannot point to its harmful
+  line" hand-wave. If you reference a function in the
+  neighborhood whose BODY is NOT present in the source excerpts
+  (so you cannot honestly cite a specific harmful line), then
+  EITHER:
+    (a) emit that function as ``role: "intermediate"`` with the
+        line of the call site that reaches it, NOT as a sink;
+        place the chain-end where you DO have body visibility,
+        OR
+    (b) if no honest sink anchor is reachable from the input,
+        omit the sink role entirely (the path may legitimately
+        end with intermediate-only nodes), set
+        ``confidence: low`` and ``needs_more_context: true``,
+        and name the missing callee in ``uncertainty`` so the
+        runner can re-call at deeper retrieval depth.
+
+  This rule is project-agnostic: a sink anchor without a real
+  line citation is unusable for downstream Step 4 attack-chain
+  synthesis regardless of which CVE the IR represents. Honest
+  "no sink reachable in this neighborhood" is strictly more
+  useful than a fabricated ``line: 0`` sink.
+
 PART B — Path edges.
 
   Edges connect the nodes you listed. Each edge has from / to

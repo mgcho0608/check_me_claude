@@ -56,7 +56,12 @@ class IRMatchEntry:
             "judge_confidence": self.judge_confidence,
             "structural_node_overlap": self.structural_node_overlap,
             "candidates_considered": self.candidates_considered,
-            "judge_reason": self.judge_reason[:300],
+            # Full reason — the judge's diverging_aspects /
+            # matched_aspects are critical for sink-line and
+            # attack-surface audit (see PLAN.md Appendix A on
+            # eval calibration). Truncating here hid the exact
+            # divergence reasons in the persisted report.
+            "judge_reason": self.judge_reason,
         }
 
 

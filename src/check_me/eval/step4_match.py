@@ -59,7 +59,9 @@ class ScenarioMatchEntry:
                 "shared_ir_ids_count": self.shared_ir_ids_count,
             },
             "candidates_considered": self.candidates_considered,
-            "judge_reason": self.judge_reason[:300],
+            # Full reason — see eval/step3_match.py for the
+            # rationale (PLAN Appendix A on eval calibration).
+            "judge_reason": self.judge_reason,
         }
 
 
