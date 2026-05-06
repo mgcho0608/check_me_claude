@@ -65,12 +65,13 @@ DEFAULT_SYNTH_TEMPERATURE: float = 0.0
 # headroom. Override via ``chunk_size`` kwarg.
 DEFAULT_CHUNK_SIZE = 15
 
-# Concurrent chunked-Step-4 calls. Default 4 for the internal-LLM
-# environment without per-minute quotas. Per-chunk inputs run
-# 100-200K tokens on stack-style C codebases (full IR list +
-# per-IR sink excerpts) — public-cloud users on tight per-minute
-# input-token quotas should drop this to 1 sequential.
-DEFAULT_MAX_WORKERS = 4
+# Concurrent chunked-Step-4 calls. Default 8 for the internal-LLM
+# environment without per-minute quotas (matches Step 2 / 3
+# defaults). Per-chunk inputs run 100-200K tokens on stack-style
+# C codebases (full IR list + per-IR sink excerpts) — public-
+# cloud users on tight per-minute input-token quotas should drop
+# this to 1 sequential.
+DEFAULT_MAX_WORKERS = 8
 
 
 @dataclass

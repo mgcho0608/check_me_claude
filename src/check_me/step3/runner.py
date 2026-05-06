@@ -10,7 +10,7 @@ Produces ``evidence_irs.v1.json``: one IR per ``kept`` entrypoint.
 
 Resilience mirrors Step 2's runner:
 
-  - parallel dispatch (default ``max_workers=4``) tuned for the
+  - parallel dispatch (default ``max_workers=8``) tuned for the
     internal-LLM environment without per-minute quotas; drop to
     1 (sequential) on public-cloud providers with tight quotas
   - each IR synthesis call is wrapped; on raised exception a
@@ -108,7 +108,7 @@ def run(
     config: Config | None = None,
     client: Any | None = None,
     include_quarantined: bool = False,
-    max_workers: int = 4,
+    max_workers: int = 8,
     synth_retry_passes: int = 2,
     synth_retry_cooldown_sec: float = 5.0,
     enable_escalation: bool = True,

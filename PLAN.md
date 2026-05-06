@@ -932,9 +932,13 @@ reasoning available):
 - `reasoning_effort = "high"` on every LLM call site (was
   `"minimal"` — cuts per-call wall-clock, hurts deep reasoning
   on IR/scenario synthesis).
-- `max_workers = 4` for chunked miner, verifier, Step 3 IR
-  synthesis, chunked Step 4 (was `1` sequential — public-cloud
-  rate-limit accommodation).
+- `max_workers = 8` for chunked miner, verifier, Step 3 IR
+  synthesis, chunked Step 4 (was `1` sequential under public-
+  cloud rate-limit; raised to 4 then 8 after empirical
+  measurement on internal-LLM showed no per-request slowdown
+  with additional concurrency on contiki-class workloads —
+  per-candidate verifier averaged 123s at 4 workers, halves at
+  8). Drop to 1 on quota-tight providers.
 - Retry cooldown `5s` (was `60s` — same rationale).
 - `max_tokens_ceiling = 131072` (was `65536`) for Step 2 miner /
   Step 3 / Step 4 synthesis; `32768` for Step 2 verifier and

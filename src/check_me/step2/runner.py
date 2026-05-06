@@ -69,7 +69,7 @@ def run(
     miner_max_workers: int = miner_mod.DEFAULT_MAX_WORKERS,
     miner_use_chunk_focused_slice: bool = True,
     miner_chunk_hop_depth: int = 2,
-    verifier_max_workers: int = 4,
+    verifier_max_workers: int = 8,
     verifier_retry_passes: int = 2,
     verifier_retry_cooldown_sec: float = 5.0,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
@@ -98,12 +98,17 @@ def run(
     quarantine — never silent-deleted, audit trail preserved per
     PLAN Rule 4.
 
-    ``verifier_max_workers`` defaults to ``4`` for the
-    internal-LLM environment without per-minute quotas. On
-    public-cloud providers with strict quotas (Gemini 2M/min
-    input tokens etc.) drop to 1 to pace under quota. Candidate
-    counts can run into the hundreds on stack-style C codebases
-    so the retry passes handle transient hiccups regardless.
+    ``verifier_max_workers`` defaults to ``8`` for the
+    internal-LLM environment without per-minute quotas. Raised
+    from 4 after a contiki run (361 candidates, per-candidate
+    average 123s) showed the internal-LLM server tolerated
+    additional concurrency without per-request slowdown — total
+    wall-clock halves with 8 workers when the server is not
+    throughput-bound. On public-cloud providers with strict
+    quotas (Gemini 2M/min input tokens etc.) drop to 1 to pace
+    under quota. Candidate counts can run into the hundreds on
+    stack-style C codebases so the retry passes handle transient
+    hiccups regardless.
 
     Configs and clients are optional — if not supplied, the runner
     loads them from the environment and constructs OpenAI SDK

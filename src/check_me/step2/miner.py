@@ -53,14 +53,19 @@ DEFAULT_CHUNK_SIZE = 30
 # Concurrent miner / verifier calls. The OpenAI SDK is thread-safe.
 #
 # Default tuned for the internal-LLM environment (no per-minute
-# input-token quota): 4 concurrent chunks. Public-cloud Gemini
+# input-token quota): 8 concurrent chunks. Public-cloud Gemini
 # users with strict per-minute quotas (e.g. 2M/min) should drop
 # this to 1 — see runner kwargs / env-var overrides. The previous
 # default was 1 (sequential) precisely because the miner's
 # per-chunk input can run 100-200K tokens on stack-style C
 # codebases and concurrent dispatch burst past public-cloud
-# quotas; the sweet spot is provider-dependent.
-DEFAULT_MAX_WORKERS = 4
+# quotas; the sweet spot is provider-dependent. Raised from 4 to
+# 8 after empirical measurement (per-candidate verifier average
+# 123s on contiki at max_workers=4) showed the internal-LLM
+# server handled additional concurrency without per-request
+# slowdown; 8 keeps total wall-clock bounded while staying short
+# of the server's serving capacity ceiling.
+DEFAULT_MAX_WORKERS = 8
 
 
 # Default temperature for miner calls. PLAN proposer/verifier split:
