@@ -185,6 +185,8 @@ def mine_chunked(
         len(chunks), chunk_size, max_workers,
     )
 
+    import time as _time
+
     def _run_chunk(chunk_idx: int, chunk: list[str]) -> tuple[int, CallResult | None, dict[str, Any] | None]:
         """Run one miner chunk. On exception (e.g. exhausted 429
         retry budget) return (idx, None, error_info) so the merge
@@ -193,6 +195,7 @@ def mine_chunked(
         instead of aborting on a single transient hiccup. PLAN
         Rule 4: silent delete is forbidden — the per-chunk
         diagnostic records the error so the operator can re-run."""
+        t0 = _time.monotonic()
         try:
             result = mine(
                 client=client,
@@ -206,12 +209,21 @@ def mine_chunked(
                 temperature=temperature,
                 chat_fn=chat_fn,
             )
+            elapsed = _time.monotonic() - t0
+            proposed = len((result.parsed or {}).get("candidates", []))
+            logger.info(
+                "step2.miner: chunk %d/%d done assigned=%d proposed=%d"
+                " attempts=%d elapsed=%.1fs",
+                chunk_idx + 1, len(chunks), len(chunk), proposed,
+                result.attempts, elapsed,
+            )
             return chunk_idx, result, None
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
+            elapsed = _time.monotonic() - t0
             err = f"{type(exc).__name__}: {exc}"
             logger.warning(
-                "step2.miner: chunk %d failed (%d candidates) — %s",
-                chunk_idx, len(chunk), err[:200],
+                "step2.miner: chunk %d/%d FAILED assigned=%d elapsed=%.1fs err=%s",
+                chunk_idx + 1, len(chunks), len(chunk), elapsed, err[:120],
             )
             return chunk_idx, None, {"error": err[:300], "chunk_size": len(chunk)}
 

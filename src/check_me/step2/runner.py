@@ -160,6 +160,12 @@ def run(
     # sweeps the still-failed entries up to ``verifier_retry_passes``
     # more times sequentially with a cooldown between passes so
     # provider quotas can refill.
+    # Liveness counter: incremented after every verifier call (success
+    # or fail). Logged per-call so a long sequential or parallel run
+    # is observable in real time when ``-v`` is on.
+    _done = {"n": 0}
+    _total = len(proposed)
+
     def _attempt_verify(cand: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         """Return (cand, verdict, info). info has ``ok: bool`` and
         either ``attempts`` (on success) or ``error`` (on failure).
@@ -170,6 +176,7 @@ def run(
             candidate_function=cand.get("function", ""),
             candidate_file=cand.get("file"),
         )
+        t0 = time.monotonic()
         try:
             v_result = verifier_mod.verify_one(
                 client=verifier_client,
@@ -178,13 +185,34 @@ def run(
                 candidate=cand,
                 chat_fn=chat_fn,
             )
+            elapsed = time.monotonic() - t0
+            _done["n"] += 1
+            logger.info(
+                "step2.verifier: %d/%d %s(%s) verdict=%s elapsed=%.1fs attempts=%d",
+                _done["n"], _total,
+                cand.get("id"), cand.get("function"),
+                v_result.parsed.get("verdict", "?"),
+                elapsed, v_result.attempts,
+            )
             return cand, v_result.parsed, {"ok": True, "attempts": v_result.attempts}
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
+            elapsed = time.monotonic() - t0
             err_text = f"{type(exc).__name__}: {exc}"
+            _done["n"] += 1
+            logger.warning(
+                "step2.verifier: %d/%d %s(%s) FAILED elapsed=%.1fs err=%s",
+                _done["n"], _total,
+                cand.get("id"), cand.get("function"),
+                elapsed, err_text[:120],
+            )
             synthetic = _synthetic_unverified_verdict(err_text)
             return cand, synthetic, {"ok": False, "error": err_text[:300]}
 
     # First pass — bounded parallelism (default sequential for verifier).
+    logger.info(
+        "step2.verifier: first pass — %d candidate(s), max_workers=%d",
+        _total, verifier_max_workers,
+    )
     if verifier_max_workers <= 1 or len(proposed) <= 1:
         verdicts = [_attempt_verify(c) for c in proposed]
     else:

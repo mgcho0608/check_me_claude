@@ -189,6 +189,20 @@ def _regex_compare(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="check-me")
+    parser.add_argument(
+        "-v", "--verbose",
+        action="count",
+        default=0,
+        help=(
+            "Stream INFO-level progress logs to stderr. Pass twice"
+            " (-vv) for DEBUG. Without this flag the runners are silent"
+            " until each subcommand's final summary line — useful in CI"
+            " but unhelpful when watching a long Step 2 / Step 3 / Step 4"
+            " run for liveness. Adds per-candidate / per-IR / per-chunk"
+            " progress lines so you can `tail -f` a log file or follow"
+            " stderr in real time."
+        ),
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p1 = sub.add_parser("step1", help="Run deterministic substrate extraction")
@@ -347,7 +361,36 @@ def main(argv: list[str] | None = None) -> int:
     p6.set_defaults(func=_eval)
 
     args = parser.parse_args(argv)
+    _configure_logging(args.verbose)
     return args.func(args)
+
+
+def _configure_logging(verbosity: int) -> None:
+    """Wire up stderr logging when -v/--verbose is set.
+
+    Without this, the runners' ``logger.info`` calls (per-candidate
+    verifier progress, per-IR Step 3 progress, per-chunk Step 4
+    progress) are silently dropped at Python's default WARNING
+    threshold — which is exactly the case where the operator most
+    needs liveness signal. Single ``-v`` switches to INFO; ``-vv``
+    to DEBUG. We log to stderr so subcommands' stdout (still the
+    one-line summary) stays clean for piping."""
+    if verbosity <= 0:
+        return
+    import logging
+    level = logging.INFO if verbosity == 1 else logging.DEBUG
+    handler = logging.StreamHandler(stream=sys.stderr)
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Avoid double-handlers on repeated invocations from tests.
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.addHandler(handler)
 
 
 def _step2(args: argparse.Namespace) -> int:

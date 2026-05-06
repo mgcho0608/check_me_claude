@@ -198,7 +198,10 @@ def synthesise_scenarios_chunked(
 
     chunk_total = len(chunks)
 
+    import time as _time
+
     def _run_chunk(idx: int, assigned: list[str]) -> tuple[int, CallResult | None, dict[str, Any] | None]:
+        t0 = _time.monotonic()
         try:
             result = synthesise_scenarios(
                 client=client, config=config,
@@ -215,12 +218,21 @@ def synthesise_scenarios_chunked(
                 temperature=temperature,
                 chat_fn=chat_fn,
             )
+            elapsed = _time.monotonic() - t0
+            produced = len((result.parsed or {}).get("attack_scenarios", []))
+            logger.info(
+                "step4.synth: chunk %d/%d done assigned=%d produced=%d"
+                " attempts=%d elapsed=%.1fs",
+                idx + 1, chunk_total, len(assigned), produced,
+                result.attempts, elapsed,
+            )
             return idx, result, None
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
+            elapsed = _time.monotonic() - t0
             err = f"{type(exc).__name__}: {exc}"
             logger.warning(
-                "step4.synth: chunk %d failed (%d assigned IRs) — %s",
-                idx, len(assigned), err[:200],
+                "step4.synth: chunk %d/%d FAILED assigned=%d elapsed=%.1fs err=%s",
+                idx + 1, chunk_total, len(assigned), elapsed, err[:120],
             )
             return idx, None, {"error": err[:300], "assigned_count": len(assigned)}
 

@@ -183,12 +183,17 @@ def run(
             result.attempts,
         )
 
+    # Liveness counter, incremented on every entrypoint completion.
+    _done = {"n": 0}
+    _total = len(used_eps)
+
     def _synthesise_one(idx: int, ep: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, Any]]:
         """Compute neighborhood, extract excerpts, call synthesis,
         and (when ``enable_escalation``) re-call at deeper hops if
         the LLM sets ``needs_more_context: true``. Returns
         (idx, ir_dict, info). On exception ``info.ok`` is False
         and ir_dict is the synthetic placeholder."""
+        t0 = time.monotonic()
         try:
             ir_parsed, n_nodes, n_edges, n_excerpts, attempts = _attempt_at_depth(
                 ep, hop_depth=DEFAULT_HOP_DEPTH,
@@ -246,12 +251,31 @@ def run(
             # Strip the meta-signal so the persisted IR conforms
             # cleanly to the on-disk schema.
             ir_parsed.pop("needs_more_context", None)
+            elapsed = time.monotonic() - t0
+            _done["n"] += 1
+            sink_count = sum(
+                1 for n in (ir_parsed.get("path") or {}).get("nodes", [])
+                if n.get("role") == "sink"
+            )
+            logger.info(
+                "step3: %d/%d %s entrypoint=%s nodes=%d sinks=%d"
+                " escalated=%s elapsed=%.1fs",
+                _done["n"], _total,
+                ep.get("id"), ep.get("function"),
+                info.get("neighborhood_nodes", 0),
+                sink_count,
+                bool(info.get("escalated")),
+                elapsed,
+            )
             return idx, ir_parsed, info
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
+            elapsed = time.monotonic() - t0
             err = f"{type(exc).__name__}: {exc}"
+            _done["n"] += 1
             logger.warning(
-                "step3: IR synthesis failed for entrypoint %s — %s",
-                ep.get("id"), err[:200],
+                "step3: %d/%d %s entrypoint=%s FAILED elapsed=%.1fs err=%s",
+                _done["n"], _total,
+                ep.get("id"), ep.get("function"), elapsed, err[:120],
             )
             return idx, _synthetic_unverified_ir(
                 entrypoint=ep, error_text=err,
@@ -262,6 +286,10 @@ def run(
             }
 
     # First pass — bounded parallelism (default sequential).
+    logger.info(
+        "step3: first pass — %d entrypoint(s), max_workers=%d, escalation=%s",
+        _total, max_workers, enable_escalation,
+    )
     results: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
     if max_workers <= 1 or len(used_eps) <= 1:
         for i, ep in enumerate(used_eps):
