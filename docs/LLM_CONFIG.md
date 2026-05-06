@@ -12,12 +12,14 @@ in via three env vars. No code branches on provider.
 | `CHECK_ME_LLM_KEY` | Provider API key (treat as a secret) |
 | `CHECK_ME_LLM_MODEL` | Model identifier as the provider expects it |
 
-Two more, with sensible defaults:
+Four more, with sensible defaults:
 
 | Variable | Default | Notes |
 |---|---|---|
 | `CHECK_ME_LLM_TEMPERATURE` | `0.1` | 0.0 for verifier (no creativity), 0.1 for proposer |
 | `CHECK_ME_LLM_MAX_TOKENS` | `4096` | Must cover thinking budget on Gemini 2.5/3; <2048 risks empty content |
+| `CHECK_ME_LLM_TIMEOUT_SEC` | `1800` | Per-request HTTP timeout. At `reasoning_effort=high` a Step 3 / Step 4 call can legitimately take 20-40 min on a long prompt — the SDK's 600s default forces retry storms when the model genuinely needs longer. |
+| `CHECK_ME_LLM_MAX_RETRIES` | `1` | OpenAI SDK auto-retries on transient errors per call. Was 2 (SDK default); paired with the higher timeout, 1 keeps worst-case bounded at `2 * timeout_sec`. |
 
 `.env` is loaded automatically when the project's `pyproject.toml`
 is reachable. In production the values come from the deploy

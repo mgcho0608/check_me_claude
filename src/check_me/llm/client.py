@@ -82,8 +82,22 @@ class ChatResponse:
 def make_client(config: Config) -> OpenAI:
     """Construct an OpenAI SDK client pointed at the configured
     provider. The SDK appends the ``/chat/completions`` path itself,
-    so ``config.url`` is the base path *up to but not including* it."""
-    return OpenAI(base_url=config.url, api_key=config.key)
+    so ``config.url`` is the base path *up to but not including* it.
+
+    ``timeout`` and ``max_retries`` are sized for thinking-model
+    runs at ``reasoning_effort: "high"`` — a single Step 3 / Step 4
+    LLM call on a long-context prompt can legitimately take
+    20-40 minutes, well beyond the SDK's 600s default. The previous
+    default caused retry storms (each retry = 10min wasted) when
+    internal-LLM calls genuinely needed longer to think. Both
+    knobs are env-overridable via ``CHECK_ME_LLM_TIMEOUT_SEC`` /
+    ``CHECK_ME_LLM_MAX_RETRIES``."""
+    return OpenAI(
+        base_url=config.url,
+        api_key=config.key,
+        timeout=config.timeout_sec,
+        max_retries=config.max_retries,
+    )
 
 
 _RETRY_DELAY_RE = re.compile(

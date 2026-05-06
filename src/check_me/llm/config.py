@@ -71,6 +71,8 @@ class Config:
     model: str
     temperature: float
     max_tokens: int
+    timeout_sec: float = 1800.0
+    max_retries: int = 1
 
     def redacted(self) -> dict:
         """Return a dict safe to log: key replaced with a marker."""
@@ -80,6 +82,8 @@ class Config:
             "model": self.model,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "timeout_sec": self.timeout_sec,
+            "max_retries": self.max_retries,
         }
 
 
@@ -102,11 +106,27 @@ _ENV_VAR_DEFAULT = {
     "model": "CHECK_ME_LLM_MODEL",
     "temperature": "CHECK_ME_LLM_TEMPERATURE",
     "max_tokens": "CHECK_ME_LLM_MAX_TOKENS",
+    "timeout_sec": "CHECK_ME_LLM_TIMEOUT_SEC",
+    "max_retries": "CHECK_ME_LLM_MAX_RETRIES",
 }
 
 _BUILTIN_DEFAULTS = {
     "temperature": "0.1",
     "max_tokens": "4096",
+    # Per-request HTTP timeout for the OpenAI SDK call. Default 30
+    # min — sized for ``reasoning_effort: "high"`` runs on long
+    # prompts (Step 3 IR synthesis with N=2 hybrid retrieval, Step 4
+    # holistic scenario synthesis with all IRs visible). The SDK
+    # default of 600s (10 min) was tight enough that internal-LLM
+    # runs at high reasoning timed out on the long calls and the SDK
+    # auto-retried — burning prompt tokens without progress.
+    "timeout_sec": "1800",
+    # Number of OpenAI SDK auto-retries on transient errors per call.
+    # Default 1 (was the SDK default of 2). Combined with the higher
+    # per-request timeout above, worst-case time on a single call is
+    # bounded at 2 * timeout_sec = 1 hour — still bounded, but with
+    # fewer redundant retry attempts after a long real-time-out.
+    "max_retries": "1",
 }
 
 
@@ -165,6 +185,8 @@ def load_config(
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    timeout_sec: float | None = None,
+    max_retries: int | None = None,
 ) -> Config:
     """Resolve a ``Config`` from env vars + ``.env`` + explicit kwargs.
 
@@ -179,6 +201,8 @@ def load_config(
         "model": model,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "timeout_sec": timeout_sec,
+        "max_retries": max_retries,
     }
 
     resolved_url = _resolve("url", step, overrides)
@@ -197,6 +221,8 @@ def load_config(
 
     raw_temp = _resolve("temperature", step, overrides)
     raw_max = _resolve("max_tokens", step, overrides)
+    raw_timeout = _resolve("timeout_sec", step, overrides)
+    raw_retries = _resolve("max_retries", step, overrides)
     try:
         resolved_temp = float(raw_temp)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
@@ -208,6 +234,18 @@ def load_config(
     except (TypeError, ValueError) as exc:
         raise ConfigError(
             f"CHECK_ME_LLM_MAX_TOKENS not an int: {raw_max!r}"
+        ) from exc
+    try:
+        resolved_timeout = float(raw_timeout)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"CHECK_ME_LLM_TIMEOUT_SEC not a float: {raw_timeout!r}"
+        ) from exc
+    try:
+        resolved_retries = int(raw_retries)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"CHECK_ME_LLM_MAX_RETRIES not an int: {raw_retries!r}"
         ) from exc
 
     if resolved_max < 256:
@@ -221,6 +259,16 @@ def load_config(
             f"CHECK_ME_LLM_TEMPERATURE={resolved_temp} out of typical range"
             " 0.0-2.0."
         )
+    if resolved_timeout < 30:
+        raise ConfigError(
+            f"CHECK_ME_LLM_TIMEOUT_SEC={resolved_timeout} too low — at"
+            " reasoning_effort=high a single Step 3 / Step 4 LLM call can"
+            " take 5-30 minutes. Use 600+ for production, 30+ for tests."
+        )
+    if resolved_retries < 0:
+        raise ConfigError(
+            f"CHECK_ME_LLM_MAX_RETRIES={resolved_retries} must be >= 0."
+        )
 
     return Config(
         url=resolved_url.rstrip("/"),
@@ -228,4 +276,6 @@ def load_config(
         model=resolved_model,
         temperature=resolved_temp,
         max_tokens=resolved_max,
+        timeout_sec=resolved_timeout,
+        max_retries=resolved_retries,
     )
