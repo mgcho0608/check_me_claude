@@ -1,0 +1,50 @@
+{
+  "schema_version": "v1",
+  "active_datasets": [
+    {
+      "id": "dnsmasq-CVE-2017-14491",
+      "project": "dnsmasq",
+      "cve": "CVE-2017-14491",
+      "status": "active",
+      "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
+    },
+    {
+      "id": "libssh-CVE-2018-10933",
+      "project": "libssh",
+      "cve": "CVE-2018-10933",
+      "status": "active",
+      "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
+    },
+    {
+      "id": "lwip-CVE-2020-22283",
+      "project": "lwip",
+      "cve": "CVE-2020-22283",
+      "status": "active",
+      "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
+    },
+    {
+      "id": "mbedtls-CVE-2018-0488",
+      "project": "mbedtls",
+      "cve": "CVE-2018-0488",
+      "status": "active",
+      "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
+    },
+    {
+      "id": "sudo-CVE-2021-3156",
+      "project": "sudo",
+      "cve": "CVE-2021-3156",
+      "status": "active",
+      "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
+    }
+  ],
+  "excluded_datasets": [
+    {
+      "id": "contiki-ng-CVE-2021-21281",
+      "project": "contiki-ng",
+      "cve": "CVE-2021-21281",
+      "status": "excluded",
+      "reason": "Source only, no gold labels. Codebase too large for reliable CVE-chain-scoped gold labeling at this time.",
+      "gold": []
+    }
+  ]
+}
