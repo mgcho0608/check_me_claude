@@ -35,6 +35,7 @@ def verify_one(
     slice_: SubstrateSlice,
     candidate: dict[str, Any],
     *,
+    source_excerpts: list[Any] | None = None,
     max_retries: int = 2,
     max_tokens_ceiling: int = 32768,
     reasoning_effort: str | None = "high",
@@ -45,8 +46,15 @@ def verify_one(
     candidate dict; this function strips the miner-only keys before
     handing it to the verifier prompt builder.
 
-    ``reasoning_effort`` defaults to ``"minimal"`` — see
-    :func:`check_me.step2.miner.mine` for the rationale.
+    ``source_excerpts`` (optional) is a list of
+    :class:`step3.code_excerpt.FunctionExcerpt` covering the
+    candidate function and its 2-hop call-graph neighbourhood. When
+    supplied, the verifier sees the source bodies in addition to
+    the substrate slice — this is the Step 2 source-visibility
+    upgrade per PLAN §6 Rule 2 (downstream tolerates substrate
+    imperfections by reading source).
+
+    ``reasoning_effort`` defaults to ``"high"``.
 
     ``temperature`` defaults to 0.0 — see
     :data:`DEFAULT_VERIFIER_TEMPERATURE`.
@@ -54,7 +62,9 @@ def verify_one(
     if temperature is not None and temperature != config.temperature:
         config = replace(config, temperature=temperature)
     structural = candidate_for_verifier(candidate)
-    system, user = build_verifier_messages(slice_, structural)
+    system, user = build_verifier_messages(
+        slice_, structural, source_excerpts=source_excerpts,
+    )
     extra = reasoning_extra(reasoning_effort)
     return chat_json(
         client=client,

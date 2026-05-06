@@ -59,8 +59,12 @@ def test_callback_function_added_to_candidates():
 
 
 def test_call_graph_neighborhood_extracted():
-    """Edges where caller OR callee touches a candidate should appear
-    in the slice; unrelated edges should not."""
+    """Every edge survives the relevance filter now that the
+    candidate pool is the union of every function name in the
+    substrate (Step 1 category labels are imperfect heuristics —
+    using them as a hard gate would silently drop downstream
+    candidates). The cap, not category-relevance, is what bounds
+    the slice."""
     sub = _empty_substrate()
     sub["categories"]["trust_boundaries"].append({
         "kind": "network_socket", "function": "entry",
@@ -73,10 +77,14 @@ def test_call_graph_neighborhood_extracted():
     ]
     s = slice_substrate(sub)
     cg_pairs = sorted((e["caller"], e["callee"]) for e in s.call_graph)
-    assert cg_pairs == [("entry", "helper"), ("z", "entry")]
+    assert cg_pairs == [("entry", "helper"), ("x", "y"), ("z", "entry")]
 
 
-def test_guards_filtered_to_neighborhood():
+def test_guards_kept_for_every_named_function():
+    """Now that the candidate pool is the union of every function
+    name in the substrate (so guard.function rows enter the pool
+    too), guards survive the relevance filter regardless of which
+    Step 1 category named the function. The cap bounds the size."""
     sub = _empty_substrate()
     sub["categories"]["trust_boundaries"].append({
         "kind": "network_socket", "function": "entry",
@@ -95,11 +103,17 @@ def test_guards_filtered_to_neighborhood():
     ]
     s = slice_substrate(sub)
     funcs = sorted(g["function"] for g in s.guards)
-    assert funcs == ["entry", "helper"]
-    assert "unrelated" not in funcs
+    assert funcs == ["entry", "helper", "unrelated"]
 
 
-def test_evidence_anchors_filtered_by_file():
+def test_evidence_anchors_kept_when_file_carries_candidate_relevant_row():
+    """An anchor row in a file that hosts a candidate-relevant row
+    (trust boundary, callback registration, neighborhood call edge,
+    or relevant guard) is kept. ``other.c`` here has no such row,
+    so its anchor is dropped — file-based filter survives the
+    pool expansion because ``relevant_files`` is derived from rows
+    actually emitted in the slice, not from the candidate pool
+    membership directly."""
     sub = _empty_substrate()
     sub["categories"]["trust_boundaries"].append({
         "kind": "network_socket", "function": "entry",
@@ -138,16 +152,17 @@ def test_config_triggers_filtered_to_candidate_relevant_files():
     assert s.config_mode_command_triggers[0]["file"] == "f.c"
 
 
-def test_call_edge_cap_applied_after_relevance_filter():
-    """The ``max_call_edges`` cap kicks in *after* the relevance
-    filter, so it never drops something the miner needs."""
+def test_call_edge_cap_bounds_slice_size():
+    """The ``max_call_edges`` cap bounds the slice. With the pool
+    expanded to every function name in the substrate, every edge is
+    candidate-relevant, so the cap is the sole size bound. The
+    round-robin selector keeps the per-candidate fairness so a
+    single high-degree candidate cannot starve others."""
     sub = _empty_substrate()
     sub["categories"]["trust_boundaries"].append({
         "kind": "network_socket", "function": "entry",
         "file": "f.c", "line": 1, "direction": "untrusted_to_trusted",
     })
-    # 50 relevant + 1000 irrelevant edges; cap at 30 → 30 relevant kept,
-    # all irrelevant dropped (relevance filter wins).
     sub["categories"]["call_graph"] = (
         [
             {"caller": "entry", "callee": f"helper_{i}",
@@ -162,7 +177,6 @@ def test_call_edge_cap_applied_after_relevance_filter():
     )
     s = slice_substrate(sub, max_call_edges=30)
     assert len(s.call_graph) == 30
-    assert all(e["caller"] == "entry" for e in s.call_graph)
 
 
 def test_to_json_dict_matches_dataclass_fields():

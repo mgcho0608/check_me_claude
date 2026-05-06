@@ -249,9 +249,20 @@ You are a security-analysis verifier. A separate analyst has
 produced a runtime entrypoint candidate from a deterministic
 substrate slice. You receive ONLY the candidate's structural facts
 (function name, file, line, trigger_type, supporting substrate
-edges) AND the same substrate slice the analyst saw. You do NOT see
-the analyst's reachability or attacker-controllability text — your
-critique must be independent.
+edges) AND the same substrate slice the analyst saw, PLUS the
+source code of the candidate function and its 2-hop call-graph
+neighbourhood. You do NOT see the analyst's reachability or
+attacker-controllability text — your critique must be independent.
+
+The substrate is an imperfect heuristic by design (PLAN §6 Rule 2).
+A candidate may be missing from ``trust_boundaries`` /
+``callback_registrations`` and still be a real entrypoint — read
+the source excerpts to corroborate or refute the candidate's
+reachability and attacker-controllability when the substrate is
+sparse. Conversely, a candidate may sit in a substrate row that
+looks suggestive but the source reveals it as a static lookup
+table or local-only helper — read the source and trust what it
+shows over what the substrate's category label implies.
 
 Your task: produce a structured critique in the form below, then
 recommend keep or quarantine.
@@ -259,11 +270,14 @@ recommend keep or quarantine.
 Critique fields:
 
 - reachability: is this function actually reachable at runtime
-  given what the substrate exposes? Cite the specific edges /
-  rows that support or refute reachability.
+  given what the substrate exposes AND what the source shows?
+  Cite the specific edges / rows / source lines that support or
+  refute reachability.
 - attacker_controllability: can an external attacker shape the
-  input the function receives? Cite specific trust_boundaries or
-  callback_registrations rows.
+  input the function receives? Cite specific trust_boundaries,
+  callback_registrations, or source-level evidence (an external
+  socket read, an argv parse, a callback dispatched from a
+  network handler).
 - assumptions: what runtime conditions must hold for this
   candidate to fire? (build-config flags, deployed configuration,
   mode flags, an open listener, an established session, etc.)
@@ -281,9 +295,10 @@ Hard constraints:
 
 - Reply with a single JSON object — no prose, no markdown fences.
 - Do not invent file paths or line numbers; cite only what the
-  substrate slice contains.
+  substrate slice or the source excerpts contain.
 - The default verdict is "quarantined". "kept" carries the burden
-  of proof: it requires positive substrate evidence that BOTH
+  of proof: it requires positive evidence (substrate or source)
+  that BOTH
   (a) the function is actually invoked by an untrusted external
   trigger at runtime — not merely that it touches an
   attacker-relevant API in isolation, AND
@@ -301,15 +316,19 @@ Hard constraints:
     callers are local administration paths (config-file parsers,
     key/cert loaders, CLI password prompts). These are trust
     boundaries to a local attacker, but not the network attack
-    surface unless the substrate shows a network-driven caller.
+    surface unless the substrate or source shows a network-driven
+    caller.
   * functions registered as callbacks whose registration site is
     only reachable behind a debug-only / build-time-disabled
     code path (look for the registration site sitting under a
     matching ifdef in evidence_anchors).
   * functions on the egress / output side (send-only wrappers,
     serialisers writing to a buffer, log emitters).
+  * candidates appearing in a struct-of-function-pointers whose
+    source reveals a static lookup table (e.g. character-class
+    classifier arrays) rather than a runtime dispatch loop.
   * candidates whose reachability is asserted only in prose with
-    no supporting substrate row.
+    no supporting substrate row or source excerpt.
 """
 
 _VERIFIER_OUTPUT_SHAPE = """\
@@ -332,6 +351,8 @@ The output JSON must have this shape:
 def build_verifier_messages(
     slice_: SubstrateSlice,
     candidate_structural: dict[str, Any],
+    *,
+    source_excerpts: list[Any] | None = None,
 ) -> tuple[str, str]:
     """Return ``(system, user)`` prompts for the verifier.
 
@@ -342,17 +363,59 @@ def build_verifier_messages(
     just serialises whatever it gets, trusting the caller. The miner
     keys we strip explicitly are listed in ``_VERIFIER_HIDDEN_KEYS``
     so anyone editing the runner can audit at a glance.
+
+    ``source_excerpts`` is an optional list of
+    :class:`step3.code_excerpt.FunctionExcerpt` (duck-typed here as
+    ``Any`` to avoid an import cycle); when supplied, the function
+    bodies are appended to the user message so the verifier can
+    corroborate the substrate with the actual source. This is the
+    Step 2 counterpart to Step 3's N=2 retrieval — same posture,
+    same depth — and is what allows the verifier to recover
+    candidates whose substrate evidence is sparse but whose source
+    reveals a real entrypoint (mbedtls' ``mbedtls_ssl_read``,
+    lwip's ``tcp_input``, sudo's ``sudoers_policy_check``).
     """
-    user = (
+    parts: list[str] = [
         "Substrate slice (Step 1 deterministic extractor output):\n\n"
-        f"```json\n{slice_.to_json(indent=2)}\n```\n\n"
+        f"```json\n{slice_.to_json(indent=2)}\n```\n\n",
         "Entrypoint candidate (structural only — analyst's reasoning"
         " withheld):\n\n"
-        f"```json\n{json.dumps(candidate_structural, indent=2)}\n```\n\n"
+        f"```json\n{json.dumps(candidate_structural, indent=2)}\n```\n\n",
+    ]
+    if source_excerpts:
+        parts.append(_format_source_excerpts(source_excerpts))
+    parts.append(
         "Critique this candidate independently. Output JSON only.\n\n"
         + _VERIFIER_OUTPUT_SHAPE
     )
-    return _VERIFIER_SYSTEM, user
+    return _VERIFIER_SYSTEM, "".join(parts)
+
+
+def _format_source_excerpts(excerpts: list[Any]) -> str:
+    """Render a list of FunctionExcerpt-like objects as a fenced
+    code block per function. Each excerpt is duck-typed: it must
+    expose ``function``, ``file``, ``line_start``, ``line_end``,
+    and ``body`` attributes (matching :class:`step3.code_excerpt.
+    FunctionExcerpt`)."""
+    lines: list[str] = [
+        "Source excerpts of the candidate and its 2-hop call-graph"
+        " neighbourhood (use these to corroborate or refute the"
+        " substrate's claims about reachability and attacker"
+        " controllability — do NOT cite line numbers from the source"
+        " excerpt itself in your critique, only substrate rows; the"
+        " excerpts are for understanding, not for new evidence"
+        " anchors):\n\n"
+    ]
+    for ex in excerpts:
+        header = (
+            f"// {ex.file}:{ex.line_start}-{ex.line_end}"
+            f"  function: {ex.function}\n"
+        )
+        lines.append("```c\n" + header + ex.body)
+        if not ex.body.endswith("\n"):
+            lines.append("\n")
+        lines.append("```\n\n")
+    return "".join(lines)
 
 
 VERIFIER_OUTPUT_SCHEMA: dict[str, Any] = {

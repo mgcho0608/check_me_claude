@@ -1,28 +1,42 @@
 """Project-agnostic substrate slicing for Step 2 input.
 
-A real project's substrate JSON has too much detail to feed to an
-LLM directly: an OS-stack-scale C codebase routinely produces 30k+
-data_control_flow rows. The miner only needs the
-*candidate-relevant* subset:
+The candidate pool — the set of function names Step 2 will reason
+about — is the union of every function name appearing in the
+substrate. Step 1's category boundaries (which row is a "trust
+boundary", which is a "callback registration") use rule-based
+heuristics that are imperfect by design (PLAN §6 Rule 2: "the
+substrate promise is same input → same output, not 100% correct").
+Using those category labels as a hard gate for the candidate pool
+turns a substrate omission into a Step 2 false negative — the
+candidate is never seen by the miner or verifier. Instead we trust
+Step 1 to enumerate function names accurately, and the verifier
+(with source-excerpt access — see ``step2/runner.py``) decides
+reachability and attacker-controllability per PLAN §6 Rule 2
+("downstream tolerates substrate imperfections") and Rule 2b
+("lossless propagation"). The chunked miner already absorbs pool
+growth: chunk count scales linearly with the pool, per-chunk cost
+stays constant.
 
-- every ``trust_boundaries`` row (every function syntactically
-  taking external input is a candidate),
-- every ``callback_registrations`` row (every function installed
-  under a callback slot is a candidate),
-- every ``config_mode_command_triggers`` row (mode/CLI gates),
-- ``call_graph`` edges that touch any function appearing in the
-  three categories above (one-hop neighborhood) — gives the LLM
-  context about how candidates are reached without pulling in the
-  whole graph,
-- the ``guards`` rows for those neighborhood functions (so the
-  miner can reason about preconditions),
-- ``evidence_anchors`` rows in files containing the candidate
-  functions (lightweight; just the structural artefacts and magic
-  values).
+The slice keeps:
+
+- every ``trust_boundaries`` row,
+- every ``callback_registrations`` row,
+- every ``config_mode_command_triggers`` row in a candidate-
+  relevant file,
+- every ``call_graph`` edge whose caller OR callee is in the
+  candidate pool (now effectively every edge, since the pool is
+  the union of all named functions),
+- every ``guards`` row whose function is in the expanded set,
+- every ``evidence_anchors`` row in a candidate-relevant file.
+
+Soft caps trim the long tail per category to keep the slice
+JSON-serialisable in a reasonable token budget for downstream
+projection. The caps are large enough that the validated dataset
+suite (lwip / mbedtls / sudo / dnsmasq / libssh) fits without
+trimming.
 
 This slicing is **principled**, not dataset-specific. The same rule
-runs unchanged on any C codebase. The exact tuning point — "one-hop
-neighborhood" — is a generic graph operation, documented as such.
+runs unchanged on any C codebase.
 """
 
 from __future__ import annotations
@@ -170,10 +184,10 @@ def _select_per_candidate_edges(
 def slice_substrate(
     substrate: dict[str, Any] | str | Path,
     *,
-    max_call_edges: int = 1500,
-    max_guards: int = 400,
-    max_anchors: int = 400,
-    max_config_triggers: int = 400,
+    max_call_edges: int = 15_000,
+    max_guards: int = 2_000,
+    max_anchors: int = 2_000,
+    max_config_triggers: int = 2_000,
 ) -> SubstrateSlice:
     """Build a :class:`SubstrateSlice` from a Step 1 substrate.
 
@@ -183,15 +197,14 @@ def slice_substrate(
         Either a parsed JSON dict, a JSON string, or a path to a
         JSON file. The shape must match ``schemas/substrate.v1.json``.
     max_call_edges, max_guards, max_anchors, max_config_triggers
-        Soft caps for the post-relevance-filter slice. The caps
-        target a total slice of ~80K LLM tokens so that even
-        thinking-token-heavy providers (Gemini 2.5/3) have room
-        for the visible JSON response within their output budget.
-        Each cap kicks in *after* the candidate-relevance filter,
-        so excess rows that no candidate touches were already
-        dropped — the cap only trims the long tail of relevant-
-        but-redundant rows. Sorting is deterministic
-        (file → line → name) so the trimmed set is reproducible.
+        Soft caps for the slice. The caps trim the long tail of
+        rows after the relevance filter so the JSON serialisation
+        is bounded. Defaults are sized to fit the validated dataset
+        suite (lwip / mbedtls / sudo / dnsmasq / libssh) without
+        trimming; downstream chunked miner and per-candidate
+        verifier slices project this further to per-call prompt
+        size. Sorting is deterministic so the trimmed set is
+        reproducible.
 
     Notes
     -----
@@ -206,16 +219,33 @@ def slice_substrate(
     callback_rows: list[dict[str, Any]] = list(cats.get("callback_registrations", []))
     all_config: list[dict[str, Any]] = list(cats.get("config_mode_command_triggers", []))
 
-    # 1. The core candidate set: every function named in
-    #    trust_boundaries (the function field) and every callback_function
-    #    in callback_registrations.
+    # 1. Candidate pool: union of every function name appearing in
+    #    the substrate. See module docstring for the rationale —
+    #    Step 1 category labels are imperfect heuristics, so we don't
+    #    use them as a hard gate. Walks every category whose schema
+    #    defines a function-named field; project-agnostic.
     candidate_funcs: set[str] = set()
+
+    def _add(name: Any) -> None:
+        if isinstance(name, str) and name:
+            candidate_funcs.add(name)
+
     for r in trust_rows:
-        if isinstance(r.get("function"), str):
-            candidate_funcs.add(r["function"])
+        _add(r.get("function"))
     for r in callback_rows:
-        if isinstance(r.get("callback_function"), str):
-            candidate_funcs.add(r["callback_function"])
+        _add(r.get("callback_function"))
+        _add(r.get("function"))
+    for r in all_config:
+        _add(r.get("function"))
+    for r in cats.get("call_graph", []):
+        _add(r.get("caller"))
+        _add(r.get("callee"))
+    for r in cats.get("data_control_flow", []):
+        _add(r.get("function"))
+    for r in cats.get("guards", []):
+        _add(r.get("function"))
+    for r in cats.get("evidence_anchors", []):
+        _add(r.get("function"))
 
     # 2. Neighborhood: call_graph edges where caller OR callee is a
     #    candidate. Edges are distributed across candidates with a

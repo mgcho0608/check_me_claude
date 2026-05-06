@@ -29,9 +29,10 @@ Examples::
       --project libssh --cve CVE-2018-10933 \\
       --out out/libssh-CVE-2018-10933/substrate.json
 
-    # Stage 1
+    # Stage 1 — pass --source so the verifier can read source code
     python -m check_me step2 \\
       --substrate out/libssh-CVE-2018-10933/substrate.json \\
+      --source datasets/libssh-CVE-2018-10933/source \\
       --out out/libssh-CVE-2018-10933/entrypoints.json
 
     # Stage 2
@@ -260,6 +261,21 @@ def main(argv: list[str] | None = None) -> int:
     p3.add_argument("--substrate", required=True, help="path to a step1 substrate JSON")
     p3.add_argument("--out", required=True, help="output path for entrypoints.json")
     p3.add_argument(
+        "--source",
+        required=False,
+        default=None,
+        help=(
+            "Project source root (matches step1 --src). When supplied,"
+            " the Step 2 verifier sees source excerpts of the candidate"
+            " function and its 2-hop call-graph neighbourhood, in"
+            " addition to the substrate slice — this is the source-"
+            " visibility upgrade that lets Step 2 recover entrypoints"
+            " whose substrate evidence is sparse (e.g. library export"
+            " APIs not registered as callbacks). Without --source the"
+            " verifier runs in substrate-only mode (legacy behaviour)."
+        ),
+    )
+    p3.add_argument(
         "--no-chunk-focused-slice",
         action="store_true",
         help=(
@@ -423,9 +439,16 @@ def _step2(args: argparse.Namespace) -> int:
     if not substrate_path.is_file():
         print(f"error: --substrate not found: {substrate_path}", file=sys.stderr)
         return 2
+    source_root: Path | None = None
+    if args.source:
+        source_root = Path(args.source)
+        if not source_root.is_dir():
+            print(f"error: --source is not a directory: {source_root}", file=sys.stderr)
+            return 2
     substrate = json.loads(substrate_path.read_text())
     output, report = step2_runner.run(
         substrate,
+        source_root=source_root,
         miner_use_chunk_focused_slice=not args.no_chunk_focused_slice,
         miner_chunk_hop_depth=args.chunk_hop_depth,
     )

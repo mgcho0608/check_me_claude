@@ -30,6 +30,18 @@ from .substrate_slice import (
     slice_substrate,
 )
 
+# Source-excerpt extraction for the verifier slice. Imported from
+# Step 3 to keep the retrieval logic centralised: the same N=2
+# call-graph + function-body extractor that feeds Step 3's IR
+# synthesis now also feeds Step 2's verifier critique. PLAN §6
+# Rule 2 / Rule 2b.
+try:  # circular-import safe — step3 only imports step1 / llm
+    from ..step3.code_excerpt import extract_excerpts as _extract_excerpts
+    from ..step3.retrieval import compute_neighborhood as _compute_neighborhood
+except Exception:  # pragma: no cover — defensive
+    _extract_excerpts = None  # type: ignore[assignment]
+    _compute_neighborhood = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "v1"
@@ -61,6 +73,7 @@ class RunReport:
 def run(
     substrate: dict[str, Any] | str | Path,
     *,
+    source_root: Path | None = None,
     miner_config: Config | None = None,
     verifier_config: Config | None = None,
     miner_client: Any | None = None,
@@ -120,7 +133,15 @@ def run(
         ``entrypoints_json`` matches ``schemas/entrypoints.v1.json``.
     """
     start = time.monotonic()
-    slice_ = slice_substrate(substrate)
+    # Materialise the substrate as a dict so source-excerpt retrieval
+    # can walk it later without re-reading the file.
+    if isinstance(substrate, (str, Path)):
+        substrate_dict: dict[str, Any] = json.loads(Path(substrate).read_text())
+    elif isinstance(substrate, dict):
+        substrate_dict = substrate
+    else:  # already a JSON string
+        substrate_dict = json.loads(str(substrate))
+    slice_ = slice_substrate(substrate_dict)
 
     if miner_config is None:
         miner_config = load_config(step=StepKind.STEP2_MINER)
@@ -185,6 +206,33 @@ def run(
             candidate_function=cand.get("function", ""),
             candidate_file=cand.get("file"),
         )
+        # Source excerpts of the candidate + 2-hop neighbourhood —
+        # same retrieval depth Step 3 uses (PLAN §3 N=2 hybrid).
+        # The verifier reads them to corroborate / refute substrate
+        # claims when a category label is sparse or misleading.
+        excerpts: list[Any] = []
+        if (
+            source_root is not None
+            and _compute_neighborhood is not None
+            and _extract_excerpts is not None
+        ):
+            try:
+                nbhd = _compute_neighborhood(
+                    substrate_dict,
+                    entry_function=cand.get("function", ""),
+                    entry_file=cand.get("file", ""),
+                    entry_line=cand.get("line"),
+                )
+                targets = [(n.file, n.function) for n in nbhd.nodes if n.file]
+                excerpts = list(_extract_excerpts(source_root, targets))
+            except Exception as ex_exc:  # noqa: BLE001
+                logger.warning(
+                    "step2.verifier: source-excerpt extraction failed for"
+                    " %s(%s) — proceeding without source. err=%s",
+                    cand.get("id"), cand.get("function"),
+                    f"{type(ex_exc).__name__}: {ex_exc}"[:200],
+                )
+                excerpts = []
         t0 = time.monotonic()
         try:
             v_result = verifier_mod.verify_one(
@@ -192,6 +240,7 @@ def run(
                 config=verifier_config,
                 slice_=focused,
                 candidate=cand,
+                source_excerpts=excerpts or None,
                 chat_fn=chat_fn,
             )
             elapsed = time.monotonic() - t0

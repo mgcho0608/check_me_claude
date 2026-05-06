@@ -58,9 +58,10 @@ python -m check_me step1 \
   --project libssh --cve CVE-2018-10933 \
   --out out/libssh-CVE-2018-10933/substrate.json
 
-# Stage 1 — entrypoints
+# Stage 1 — entrypoints (--source 권장: verifier가 source 보고 판단)
 python -m check_me step2 \
   --substrate out/libssh-CVE-2018-10933/substrate.json \
+  --source datasets/libssh-CVE-2018-10933/source \
   --out out/libssh-CVE-2018-10933/entrypoints.json
 
 # Stage 2 — evidence IRs + attack scenarios
