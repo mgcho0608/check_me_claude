@@ -22,11 +22,10 @@ Two axes feed the same neighborhood set:
   Step 1 category that records identifier-level usage inside a
   function body). Every other function in the substrate that
   references at least one of those identifiers joins the
-  neighborhood. This is how a chain like
-  ``process_thread_tcpip_process → tcpip_input → uip_input →
-  uip_process`` recovers ``uip_process`` even though no call_graph
-  edge spans more than 2 hops to it: ``uip_buf`` / ``uip_len`` co-
-  readers form the bridging axis.
+  neighborhood. This recovers chains where the harmful frame is
+  not directly callee-reachable but shares a global packet
+  buffer / state struct with the entrypoint's call-graph
+  neighbours: shared-buffer co-readers form the bridging axis.
 
 Output: a :class:`Neighborhood` of nodes (with role hint:
 ``entry`` / ``call_neighbour`` / ``state_neighbour``) and edges

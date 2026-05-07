@@ -87,9 +87,10 @@ def written_form(cursor: cx.Cursor, *, max_len: int = 200) -> str:
     if path is None:
         return "<unknown>"
     try:
-        # Some legacy C trees ship sources with mixed encodings (e.g.
-        # latin-1 in contiki-ng's TI cc26xx vendor blobs). errors='replace'
-        # keeps the recovery best-effort without aborting Step 1.
+        # Some legacy C trees ship sources with mixed encodings
+        # (e.g. latin-1 in vendor-blob directories embedded in an
+        # otherwise UTF-8 codebase). errors='replace' keeps the
+        # recovery best-effort without aborting Step 1.
         with open(path, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except OSError:

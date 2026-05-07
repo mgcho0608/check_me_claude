@@ -21,36 +21,38 @@ LLM-using subcommands (``step2`` / ``step3`` / ``step4`` /
 ``eval``) read ``CHECK_ME_LLM_*`` env vars (see
 ``docs/LLM_CONFIG.md``).
 
-Examples::
+Examples (replace ``<key>`` with a dataset directory name such
+as ``<project>-<CVE>``, e.g. one of the entries under
+``datasets/``):
 
     # Stage 0
     python -m check_me step1 \\
-      --src datasets/libssh-CVE-2018-10933/source \\
-      --project libssh --cve CVE-2018-10933 \\
-      --out out/libssh-CVE-2018-10933/substrate.json
+      --src datasets/<key>/source \\
+      --project <project> --cve <CVE> \\
+      --out out/<key>/substrate.json
 
     # Stage 1 — pass --source so the verifier can read source code
     python -m check_me step2 \\
-      --substrate out/libssh-CVE-2018-10933/substrate.json \\
-      --source datasets/libssh-CVE-2018-10933/source \\
-      --out out/libssh-CVE-2018-10933/entrypoints.json
+      --substrate out/<key>/substrate.json \\
+      --source datasets/<key>/source \\
+      --out out/<key>/entrypoints.json
 
     # Stage 2
     python -m check_me step3 \\
-      --substrate out/libssh-CVE-2018-10933/substrate.json \\
-      --entrypoints out/libssh-CVE-2018-10933/entrypoints.json \\
-      --source datasets/libssh-CVE-2018-10933/source \\
-      --out out/libssh-CVE-2018-10933/evidence_irs.json
+      --substrate out/<key>/substrate.json \\
+      --entrypoints out/<key>/entrypoints.json \\
+      --source datasets/<key>/source \\
+      --out out/<key>/evidence_irs.json
     python -m check_me step4 \\
-      --evidence-irs out/libssh-CVE-2018-10933/evidence_irs.json \\
-      --source datasets/libssh-CVE-2018-10933/source \\
-      --out out/libssh-CVE-2018-10933/attack_scenarios.json
+      --evidence-irs out/<key>/evidence_irs.json \\
+      --source datasets/<key>/source \\
+      --out out/<key>/attack_scenarios.json
 
     # Stage 3
     python -m check_me eval \\
-      --gold datasets/libssh-CVE-2018-10933/gold \\
-      --out-dir out/libssh-CVE-2018-10933 \\
-      --report out/libssh-CVE-2018-10933/eval_report.json
+      --gold datasets/<key>/gold \\
+      --out-dir out/<key> \\
+      --report out/<key>/eval_report.json
 """
 
 from __future__ import annotations

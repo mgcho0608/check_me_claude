@@ -372,8 +372,9 @@ def build_verifier_messages(
     Step 2 counterpart to Step 3's N=2 retrieval — same posture,
     same depth — and is what allows the verifier to recover
     candidates whose substrate evidence is sparse but whose source
-    reveals a real entrypoint (mbedtls' ``mbedtls_ssl_read``,
-    lwip's ``tcp_input``, sudo's ``sudoers_policy_check``).
+    reveals a real entrypoint (e.g. a public library API, a
+    layer-internal dispatch target, or a plugin entry hook
+    whose substrate row carries little beyond a function name).
     """
     parts: list[str] = [
         "Substrate slice (Step 1 deterministic extractor output):\n\n"

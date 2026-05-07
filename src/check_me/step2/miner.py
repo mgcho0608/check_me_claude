@@ -60,11 +60,11 @@ DEFAULT_CHUNK_SIZE = 30
 # per-chunk input can run 100-200K tokens on stack-style C
 # codebases and concurrent dispatch burst past public-cloud
 # quotas; the sweet spot is provider-dependent. Raised from 4 to
-# 8 after empirical measurement (per-candidate verifier average
-# 123s on contiki at max_workers=4) showed the internal-LLM
-# server handled additional concurrency without per-request
-# slowdown; 8 keeps total wall-clock bounded while staying short
-# of the server's serving capacity ceiling.
+# 8 after empirical measurement on a stack-style project (per-
+# candidate verifier average ~2 minutes at workers=4) showed
+# the internal-LLM server handled additional concurrency without
+# per-request slowdown; 8 keeps total wall-clock bounded while
+# staying short of the server's serving-capacity ceiling.
 DEFAULT_MAX_WORKERS = 8
 
 

@@ -9,9 +9,9 @@ Two execution modes share the same prompt + schema:
   - :func:`synthesise_scenarios_chunked` — fixed-size chunks of
     sink-bearing IR ids, one fresh LLM session per chunk, results
     merged + deduped. Mirrors Step 2's chunked-miner pattern: at
-    large IR scale (e.g. contiki's 76 confident sink IRs) a single
-    holistic call drops 60+ scenarios silently no matter how the
-    coverage rule is phrased; per-chunk Part A coverage with
+    large IR scale (dozens of confident sink-bearing IRs) a
+    single holistic call drops scenarios silently no matter how
+    the coverage rule is phrased; per-chunk Part A coverage with
     explicit assigned-id lists removes that failure mode.
 
 Both modes use the same per-call ``synthesise_scenarios`` engine

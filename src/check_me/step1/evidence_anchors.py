@@ -210,9 +210,9 @@ def extract_anchors_from_tu(
             if top.kind == cx.CursorKind.ENUM_DECL and top.is_definition():
                 out.extend(_enum_member_rows(top, rel))  # type: ignore[arg-type]
             # For struct/union, also emit one row per named field so
-            # downstream layers can cite specific members (e.g.
-            # libssh's ``session_state`` field of struct
-            # ssh_session_struct).
+            # downstream layers can cite specific members (e.g. an
+            # auth-state field of a session struct that is mutated
+            # at the bug site and read at downstream gates).
             if top.kind in (cx.CursorKind.STRUCT_DECL, cx.CursorKind.UNION_DECL):
                 for kid in top.get_children():
                     if kid.kind == cx.CursorKind.FIELD_DECL and kid.spelling:
@@ -229,9 +229,10 @@ def extract_anchors_from_tu(
                         )
             continue
         # Top-level variable declarations / definitions are
-        # structural artefacts in the gold sense (e.g. contiki-ng's
-        # ``uint16_t uip_len, uip_slen;`` is a security-relevant
-        # global referenced throughout uip6.c).
+        # structural artefacts in the gold sense (e.g. a shared
+        # mutable global such as a packet length / buffer pointer
+        # that downstream layers reference as the
+        # attacker-influenced state).
         if top.kind == cx.CursorKind.VAR_DECL:
             type_text = top.type.spelling if top.type else "?"
             name = top.spelling or "<anonymous>"

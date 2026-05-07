@@ -6,10 +6,8 @@ cites IR ids; each scenario must include at least one
 ``sink``. Chains may be single-IR or multi-IR — the latter is
 the canonical case when an IR ends at an indirect-dispatch
 boundary and a sibling IR rooted at the dispatch target picks
-up the chain (e.g. CVE-2018-10933:
-``ssh_packet_socket_callback`` → ... → ``ssh_packet_process``
-boundary, then ``ssh_packet_process`` → ``ssh_packet_userauth_success``
-sink).
+up the chain (entry-callback IR ends at a dispatcher; handler-
+rooted sibling IR carries the chain to the harmful operation).
 
 Architecture:
 

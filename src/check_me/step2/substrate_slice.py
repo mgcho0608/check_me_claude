@@ -18,11 +18,11 @@ from substrate categories the schema defines:
     different translation unit is a shared API surface (library
     export, layer-internal dispatch target, plugin entry hook).
     Captures cases where Step 1's category labels do NOT name the
-    function — e.g. mbedtls' ``mbedtls_ssl_read`` (not in trust_
-    boundaries / callback_registrations but called from many demo
-    TUs) — without falling back to "every function in the
-    substrate" (which the chunked miner can absorb but at high
-    LLM-call cost).
+    function — e.g. a TLS / crypto library's public ``read`` /
+    ``write`` API exposed in a header and called from many demo
+    TUs but not registered as a callback — without falling back
+    to "every function in the substrate" (which the chunked
+    miner can absorb but at high LLM-call cost).
  5. ``call_graph`` roots — functions that appear as a caller but
     never as a callee. Generic program / module / daemon entry
     points (``main()``, init functions, library construct hooks).
@@ -295,10 +295,10 @@ def slice_substrate(
     #     trigger fires a callback, the callback typically wraps an
     #     internal dispatch function: the wrapped function is itself
     #     an entry point because attacker-controlled bytes flow from
-    #     the callback into it (libssh's
-    #     ssh_packet_socket_callback -> ssh_packet_process is the
-    #     canonical case; same shape appears in any layered protocol
-    #     stack). Generic — adds the 1-hop dispatch targets of every
+    #     the callback into it. The shape is generic for any
+    #     layered protocol stack: a network-side callback wraps an
+    #     internal dispatch function that consumes the attacker's
+    #     bytes. Generic — adds the 1-hop dispatch targets of every
     #     callback_function, no project name or symbol pattern.
     callback_handlers: set[str] = set()
     for r in callback_rows:
@@ -701,10 +701,10 @@ def slice_for_candidate_chunk(
     validation is the verifier's responsibility.
 
     Why hop=1 here, hop=2 at the verifier. On well-connected
-    codebases (libssh, dnsmasq) a hop=2 BFS rooted at 30 chunk
-    candidates pulls in nearly the entire connected component
-    (4000+ call_graph edges), inflating the per-chunk prompt past
-    qwen3.6-27b's 262K context window. Hop=1 keeps the chunk slice
+    codebases a hop=2 BFS rooted at 30 chunk candidates pulls in
+    nearly the entire connected component (thousands of
+    call_graph edges), inflating the per-chunk prompt past
+    typical context-window limits. Hop=1 keeps the chunk slice
     proportional to the chunk_size and lets PLAN §6 Rule 2b's
     miner/verifier division of labour absorb the lost depth: the
     miner emits the row regardless (Part A is unconditional), and
@@ -756,10 +756,10 @@ def slice_for_candidate_chunk(
       candidate's BFS over the call graph). config_mode_command_
       triggers used to be kept FULL on the assumption that the
       slice-level cap kept the row count tame, but on real
-      projects (lwip 1808 rows, mbedtls 2000, sudo 1517) it was
+      projects with one-to-two thousand mode/CLI gates this was
       the single largest token-budget consumer in the chunk
-      slice — pushing per-chunk prompts past qwen3.6-27b's 262K
-      context window. The chunk-relevant subset gives Part A the
+      slice — pushing per-chunk prompts past typical context-
+      window limits. The chunk-relevant subset gives Part A the
       gates that actually apply to the chunk; Part B's
       cross-chunk discovery does not consult cfg.
 
@@ -767,14 +767,16 @@ def slice_for_candidate_chunk(
       subset for the same reason — Part B's vocabulary
       (callback_registrations + indirect call edges + trust
       boundaries) does not include a list of candidate names, so
-      serialising 200-2500 of them per chunk only inflates the
-      prompt. Per-chunk Part A responsibility is delimited by the
-      user-message chunk block (see build_miner_messages).
+      serialising the full pool of names per chunk only inflates
+      the prompt. Per-chunk Part A responsibility is delimited
+      by the user-message chunk block (see
+      build_miner_messages).
 
-      On contiki-class projects this is the 95% of the slice
-      mass that gets trimmed; on libssh-class projects the
-      neighbourhood is most of the graph anyway and the
-      projection is a no-op-ish 5-10% reduction.
+      On well-connected projects with a single sprawling
+      connected component the projection trims the bulk of the
+      slice mass; on smaller codebases the chunk neighbourhood
+      is most of the graph anyway and the projection is a
+      near-no-op.
 
     Project-agnostic. Walks substrate fields the schema defines —
     no project-name or symbol-pattern branching. The same rule
@@ -866,12 +868,12 @@ def slice_for_candidate_chunk(
     # or the callee. The previous "endpoint in hop=N neighborhood"
     # filter pulled in every internal edge between neighbour
     # functions, blowing the per-chunk slice past 3000 edges on
-    # well-connected codebases (libssh, dnsmasq) where chunk_set's
-    # 30 dispatchers each have ~20-100 1-hop neighbours and the
-    # induced subgraph balloons. The chunk miner only needs to see
-    # how each chunk_set candidate is invoked / what it dispatches
-    # into — internal chains between non-candidate neighbours are
-    # the verifier's job (per-candidate hop=2 + source). Indirect
+    # well-connected codebases where chunk_set's dispatchers each
+    # have ~20-100 1-hop neighbours and the induced subgraph
+    # balloons. The chunk miner only needs to see how each
+    # chunk_set candidate is invoked / what it dispatches into —
+    # internal chains between non-candidate neighbours are the
+    # verifier's job (per-candidate hop=2 + source). Indirect
     # edges from chunk candidates are merged in (dedup by id) so
     # Part B sees its dispatch evidence regardless.
     direct_edges = [

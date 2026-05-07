@@ -10,7 +10,7 @@ the schema's ``kind`` enum:
 2. ``function_pointer_assignment`` — an assignment whose left-hand
    side is a writable expression of function-pointer type and whose
    right-hand side names a function (e.g.
-   ``session->socket_callbacks.data = ssh_packet_socket_callback``).
+   ``session->callbacks.on_data = on_data_handler``).
 
 3. ``signal_handler`` — a call to ``signal`` (POSIX) or
    ``bsd_signal`` / ``sysv_signal`` whose second argument is the
@@ -227,8 +227,9 @@ def _lhs_is_callback_target(lhs: cx.Cursor) -> bool:
 
     Tries the lhs's own type spelling first, then the canonical
     (typedef-expanded) type. Typedef'd function-pointer aliases
-    such as libssh's ``ssh_callback_data`` only become syntactically
-    visible after canonicalization.
+    only become syntactically visible after canonicalization (a
+    common pattern in libraries that hide the function-pointer
+    syntax behind a named alias).
     """
     t = lhs.type
     if _is_function_pointer_type(t.spelling):

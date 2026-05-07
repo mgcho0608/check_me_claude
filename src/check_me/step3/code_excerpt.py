@@ -63,10 +63,10 @@ def _looks_like_macro_name(s: str) -> bool:
 
     Project-agnostic — pure C identifier-shape rule. The
     convention is the C99 "Reserved identifiers" appendix +
-    every major C codebase's house style (CMake macros, Linux
-    kernel `EXPORT_SYMBOL`, contiki `PROCESS_THREAD`, libssh
-    `SSH_PACKET_CALLBACK`, OpenSSL `IMPLEMENT_*`, nginx
-    `ngx_*` macros, and so on)."""
+    the house style of essentially every major C codebase
+    (UPPER_SNAKE_CASE macros for kernel-style exports,
+    framework callback wrappers, library implementation
+    helpers, and per-module name prefixes)."""
     if len(s) < 2:
         return False
     has_upper = False
@@ -101,19 +101,21 @@ def _resolve_macro_wrapped_name(
 ) -> str | None:
     """Macro-wrapped function-definition fallback.
 
-    Some C codebases define functions through macros, e.g.::
+    Some C codebases define functions through wrapping macros,
+    e.g.::
 
-        SSH_PACKET_CALLBACK(ssh_packet_userauth_success) {
+        FRAMEWORK_HANDLER(real_function_name) {
             /* body */
         }
 
     libclang's mapping of the resulting FUNCTION_DECL has the
-    *macro* name as ``cursor.spelling`` (``SSH_PACKET_CALLBACK``)
-    and the actual function identifier appears as a child
-    cursor (typically a PARM_DECL whose spelling matches the
-    real function name). The same shape appears in contiki's
-    ``PROCESS_THREAD(name, ev, data) { ... }`` and similar
-    Linux-kernel / nginx / OpenSSL idioms.
+    *macro* name as ``cursor.spelling`` (the UPPER_SNAKE_CASE
+    wrapper) and the actual function identifier appears as a
+    child cursor (typically a PARM_DECL whose spelling matches
+    the real function name). The same shape recurs across
+    kernel-style, RTOS, web-server, and crypto-library
+    codebases that hide function-definition boilerplate behind
+    a wrapping macro.
 
     This helper returns the real function name iff:
 
@@ -157,8 +159,8 @@ def extract_excerpts(
     target.
 
     ``project_root`` is the absolute or relative path to the
-    project's source root (e.g. ``datasets/libssh-CVE-.../source``).
-    File paths in ``targets`` are relative to this root.
+    project's source root (e.g. ``datasets/<key>/source``). File
+    paths in ``targets`` are relative to this root.
 
     Functions that can't be located (file missing, no matching
     FunctionDecl, parse error) are skipped silently — the caller
@@ -205,10 +207,10 @@ def extract_excerpts(
                 # Macro-wrapped function definition fallback.
                 # See ``_resolve_macro_wrapped_name`` for the C-
                 # convention rationale; in short, codebases that
-                # define functions via UPPERCASE wrapping macros
-                # (libssh's SSH_PACKET_CALLBACK, contiki's
-                # PROCESS_THREAD, Linux kernel macros, …) put
-                # the real function name in a child cursor.
+                # define functions via UPPER_SNAKE_CASE wrapping
+                # macros (kernel-style exports, framework callback
+                # wrappers, RTOS process bodies, etc.) put the
+                # real function name in a child cursor.
                 resolved = _resolve_macro_wrapped_name(top, wanted)
                 if resolved is None:
                     continue

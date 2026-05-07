@@ -192,8 +192,8 @@ def run(
 
     # Decide single-call vs chunked. We chunk when the sink-
     # bearing IR count exceeds the chunk size — small projects
-    # take the cheaper single-call path; large ones (contiki:
-    # 76 confident sink IRs) get chunked coverage.
+    # take the cheaper single-call path; larger projects (dozens
+    # of confident sink-bearing IRs) get chunked coverage.
     sink_bearing_ids = synth_mod.collect_sink_bearing_ir_ids(irs)
     use_chunked = (
         synth_chunk_size > 0

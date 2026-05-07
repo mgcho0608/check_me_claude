@@ -120,9 +120,10 @@ def _project_include_dirs(project_root: Path) -> list[str]:
     """Inferred -I flags for source trees without compile_commands.json.
 
     Two-pass heuristic so that projects which use ``include/foo/bar.h``
-    style includes (libssh, OpenSSL, many CMake projects) get an -I for
-    the top-level ``include/`` directory even though it contains no .h
-    files directly.
+    style includes (the conventional CMake / autotools layout where
+    public headers live under a top-level ``include/`` tree) get an
+    -I for the top-level ``include/`` directory even though it
+    contains no .h files directly.
 
     Pass 1: any directory containing a .h file -> add it.
     Pass 2: for each such directory, add its parent IF the parent's

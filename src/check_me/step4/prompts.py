@@ -36,17 +36,18 @@ span multiple IRs — that is the canonical case when an IR ends
 at an indirect-dispatch boundary (its last node is intermediate
 labelled with a downstream-IR uncertainty hint) and a sibling IR
 rooted at the dispatch target carries the chain to a real sink.
-Examples of multi-IR chains:
+Two abstract shapes that the multi-IR weave handles:
 
-  - libssh CVE-2018-10933: IR rooted at ``ssh_packet_socket_callback``
-    ends at the dispatcher; a sibling IR rooted at
-    ``ssh_packet_process`` reaches the auth-state corruption
-    sink in ``ssh_packet_userauth_success``. The full chain
-    threads both IRs.
-  - dnsmasq CVE-2017-14491: a single IR rooted at
-    ``receive_query`` may already reach the heap overflow sink
-    in ``add_resource_record``; a separate scenario covers the
-    TCP variant via the ``tcp_request`` IR.
+  - **Dispatch hand-off.** An entry-side IR rooted at a network
+    callback ends at an indirect-dispatch frame whose callees are
+    the registered handlers. A sibling IR rooted at one of those
+    handlers carries the chain to the actual harmful operation.
+    The full chain threads both IRs.
+  - **Single-IR direct reach.** An IR rooted at the network entry
+    already reaches the sink within its own path. The scenario
+    references only that IR; sibling IRs (e.g. a different
+    transport for the same handler) form separate scenarios that
+    reuse the shared sink.
 
 Use the IRs as the substrate-anchored claim primitives. Do not
 invent paths or sinks — every step in the chain must reference a

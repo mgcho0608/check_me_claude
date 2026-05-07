@@ -148,10 +148,10 @@ PART C — Conditions.
     deployed configuration, prior packet/handshake state, the
     attacker's choice of input value, registered handler entries
     in callback tables, etc.). Cite substrate or source where
-    possible (e.g. "default_packet_handlers[52] ==
-    ssh_packet_userauth_success — substrate
-    callback_registrations[function_table=default_packet_handlers]
-    @ src/packet.c:90").
+    possible (e.g. "dispatch_table[<wire-byte>] resolves to the
+    sink-bearing handler — substrate
+    callback_registrations[function_table=<table-name>]
+    @ <file>:<line>").
   - "blocking": runtime conditions that, if added, would block
     the path. The fix in many CVEs is exactly such a check; if
     you can characterise it, do — even when the *vulnerable*
