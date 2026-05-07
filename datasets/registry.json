@@ -30,9 +30,23 @@
       "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
     },
     {
+      "id": "nginx-CVE-2025-23419",
+      "project": "nginx",
+      "cve": "CVE-2025-23419",
+      "status": "active",
+      "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
+    },
+    {
       "id": "sudo-CVE-2021-3156",
       "project": "sudo",
       "cve": "CVE-2021-3156",
+      "status": "active",
+      "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
+    },
+    {
+      "id": "u-boot-CVE-2018-3968",
+      "project": "u-boot",
+      "cve": "CVE-2018-3968",
       "status": "active",
       "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
     }
