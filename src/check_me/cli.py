@@ -294,10 +294,16 @@ def main(argv: list[str] | None = None) -> int:
     p3.add_argument(
         "--chunk-hop-depth",
         type=int,
-        default=2,
+        default=1,
         help=(
             "Hop depth for the per-chunk substrate-slice projection"
-            " (default: 2 — matches verifier slice_for_candidate posture)."
+            " (default: 1). The miner proposes per-candidate rows"
+            " from direct 1-hop neighbourhood evidence; deeper chain"
+            " validation is the verifier's job (per-candidate hop=2"
+            " plus source excerpts). Bump to 2+ on projects whose"
+            " miner reasoning needs more cross-cutting context, at"
+            " the cost of more tokens per chunk — risks context-"
+            " window overflow on well-connected codebases."
         ),
     )
     p3.set_defaults(func=_step2)

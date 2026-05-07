@@ -81,7 +81,7 @@ def run(
     miner_chunk_size: int = miner_mod.DEFAULT_CHUNK_SIZE,
     miner_max_workers: int = miner_mod.DEFAULT_MAX_WORKERS,
     miner_use_chunk_focused_slice: bool = True,
-    miner_chunk_hop_depth: int = 2,
+    miner_chunk_hop_depth: int = 1,
     verifier_max_workers: int = 8,
     verifier_retry_passes: int = 2,
     verifier_retry_cooldown_sec: float = 5.0,

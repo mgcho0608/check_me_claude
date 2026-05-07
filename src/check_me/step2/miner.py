@@ -160,7 +160,7 @@ def mine_chunked(
     reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_MINER_TEMPERATURE,
     use_chunk_focused_slice: bool = True,
-    chunk_hop_depth: int = 2,
+    chunk_hop_depth: int = 1,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> ChunkedMineResult:
     """Run the miner over fixed-size chunks of the candidate list,
@@ -171,6 +171,12 @@ def mine_chunked(
     call (Part A); each chunk also gets a discovery instruction
     (Part B). The merged candidate list dedupes by
     ``(function, file)`` and renumbers ids globally.
+
+    ``chunk_hop_depth`` defaults to 1 — see
+    :func:`slice_for_candidate_chunk` for the rationale. The miner
+    proposes from direct 1-hop neighbourhood evidence; deeper chain
+    validation is the verifier's job (per-candidate hop=2 + source
+    excerpts).
 
     Determinism: the candidate list is sorted before chunking, so
     chunk membership is reproducible. Within a chunk, the LLM's

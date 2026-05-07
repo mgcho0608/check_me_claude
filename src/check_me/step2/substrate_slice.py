@@ -653,11 +653,35 @@ def slice_for_candidate_chunk(
     full: SubstrateSlice,
     *,
     chunk_candidates: list[str],
-    hop_depth: int = 2,
+    hop_depth: int = 1,
 ) -> SubstrateSlice:
     """Build a chunk-focused projection of ``full`` for the chunked
     miner — generalises :func:`slice_for_candidate` from one
     candidate (verifier) to a chunk's N assigned candidates (miner).
+
+    Default ``hop_depth=1``. The miner's job is to *propose* — emit
+    one row per assigned candidate (Part A's hard rule, recall
+    guarantee per PLAN §6 Rule 2b) plus cross-chunk discoveries
+    (Part B). Reachability / attacker-controllability *verdicts*
+    happen at the verifier (per-candidate, hop_depth=2 + source
+    excerpts — see :func:`slice_for_candidate` and
+    ``step2/runner.py``). The miner therefore needs only direct
+    1-hop neighbourhood evidence to propose; deeper chain
+    validation is the verifier's responsibility.
+
+    Why hop=1 here, hop=2 at the verifier. On well-connected
+    codebases (libssh, dnsmasq) a hop=2 BFS rooted at 30 chunk
+    candidates pulls in nearly the entire connected component
+    (4000+ call_graph edges), inflating the per-chunk prompt past
+    qwen3.6-27b's 262K context window. Hop=1 keeps the chunk slice
+    proportional to the chunk_size and lets PLAN §6 Rule 2b's
+    miner/verifier division of labour absorb the lost depth: the
+    miner emits the row regardless (Part A is unconditional), and
+    the verifier — which still walks hop=2 + source — issues the
+    final verdict. Bumping ``hop_depth`` to 2 (or higher) is
+    available via the ``--chunk-hop-depth`` CLI flag for projects
+    that need deeper miner reasoning at the cost of more tokens
+    per chunk.
 
     Why this exists. On large C codebases the full
     :class:`SubstrateSlice` (typical ~1500 call_graph edges + ~900
