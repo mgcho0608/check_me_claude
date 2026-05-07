@@ -1,63 +1,62 @@
 """Project-agnostic substrate slicing for Step 2 input.
 
-The candidate pool — the set of function names Step 2 will reason
-about — is the union of five generic entrypoint patterns drawn
-from substrate categories the schema defines:
+The candidate pool is the set of functions where attacker-
+controlled bytes can plausibly enter, anchored at Step 1's two
+principled attacker-input markers:
 
  1. ``trust_boundaries[].function`` — Step 1's explicit attacker-
-    input markers.
+    input markers (network sockets, IPC endpoints, file reads,
+    external_io).
  2. ``callback_registrations[].callback_function`` and ``[].function``
     — handler bodies installed under a runtime dispatch slot, plus
-    the registration site function.
- 3. ``config_mode_command_triggers[].function`` — CLI / option /
-    mode handlers that bind external configuration to a function.
- 4. ``call_graph`` cross-TU callees — a function called from a file
-    other than its own definition file. This is the language-level
-    "external linkage + cross-TU dispatch" pattern of any modular
-    C codebase: a function exposed in a header and called from a
-    different translation unit is a shared API surface (library
-    export, layer-internal dispatch target, plugin entry hook).
-    Captures cases where Step 1's category labels do NOT name the
-    function — e.g. a TLS / crypto library's public ``read`` /
-    ``write`` API exposed in a header and called from many demo
-    TUs but not registered as a callback — without falling back
-    to "every function in the substrate" (which the chunked
-    miner can absorb but at high LLM-call cost).
- 5. ``call_graph`` roots — functions that appear as a caller but
-    never as a callee. Generic program / module / daemon entry
-    points (``main()``, init functions, library construct hooks).
- 6. Callees of registered callback handlers — when an external
-    trigger fires a callback and the callback wraps an internal
-    dispatch function, the dispatch function is itself an entry
-    point (attacker-controlled bytes flow from the callback into
-    it). Generic shape of any layered protocol / event handler:
-    ``recv_callback -> process_request`` regardless of whether
-    ``process_request`` is in the same TU. Closes the gap (4) leaves
-    when the dispatch happens within the callback's TU.
+    the registration-site function.
+ 3. 1-hop callees of any function in (1) ∪ (2). When an external
+    trigger fires a boundary or callback handler, the handler
+    typically delegates one hop further into an internal dispatch
+    function. The delegate is itself an entry point because
+    attacker-controlled bytes flow from the boundary/callback
+    into it. Generic shape of any layered protocol stack:
+    ``recv_callback -> process_request`` or
+    ``socket_handler -> dispatch_message``.
+
+Earlier revisions also added cross-TU callees (every function
+defined in one .c and called from another) and call_graph roots
+(caller-but-never-callee) as speculative cuts. Those were dropped
+because they mixed two semantically different things — high-
+precision attacker-input markers and structural over-collection
+— and pushed 75%+ of the filtering work onto the LLM verifier
+without recovering primary entrypoints unreachable from anchors.
+PLAN §6 Rule 2 ("downstream tolerates substrate imperfections")
+is satisfied by the verifier's hop-2 source-aware critique on the
+remaining pool, NOT by widening the pool with structurally
+indiscriminate cuts. When Step 1's boundary detection is
+imperfect, the right fix is to strengthen Step 1's
+trust_boundary extractor, not to paper over with Step 2 fall-back
+cuts.
 
 This split is principled and project-agnostic: every cut roots in
-a language standard or schema-defined category, none branches on a
-project name or symbol pattern. The verifier (with source-excerpt
-access — see ``step2/runner.py``) is responsible for filtering the
-pool further by reading the actual code per PLAN §6 Rule 2
-("downstream tolerates substrate imperfections").
+a schema-defined category or pure call-graph topology; no project
+name or symbol pattern.
 
 The slice keeps:
 
 - every ``trust_boundaries`` row,
 - every ``callback_registrations`` row,
-- every ``config_mode_command_triggers`` row in a candidate-
-  relevant file,
 - every ``call_graph`` edge whose caller OR callee is in the
   candidate pool,
 - every ``guards`` row whose function is in the expanded set,
+- every ``config_mode_command_triggers`` row in a candidate-
+  relevant file (kept as substrate context for the miner /
+  verifier prompts; not part of the candidate pool — config
+  gating describes WHERE behaviour is conditional, not WHAT the
+  entry point is),
 - every ``evidence_anchors`` row in a candidate-relevant file.
 
 Soft caps trim the long tail per category to keep the slice
 JSON-serialisable.
 
-This slicing is **principled**, not dataset-specific. The same rule
-runs unchanged on any C codebase.
+This slicing is *project-agnostic* — the same rule runs unchanged
+on any C codebase.
 """
 
 from __future__ import annotations
@@ -239,79 +238,41 @@ def slice_substrate(
     all_config: list[dict[str, Any]] = list(cats.get("config_mode_command_triggers", []))
     all_edges: list[dict[str, Any]] = list(cats.get("call_graph", []))
 
-    # 1. Candidate pool — five generic entrypoint patterns. See
-    #    module docstring for the rationale of each cut. The split
-    #    keeps the pool meaningfully bounded (no "every helper is a
-    #    candidate" blow-up) while not gating on Step 1 category
-    #    labels which are imperfect heuristics per PLAN §6 Rule 2.
-    candidate_funcs: set[str] = set()
+    # 1. Candidate pool — anchor-based. Functions where attacker-
+    #    controlled bytes can plausibly enter, rooted at Step 1's
+    #    two principled attacker-input markers (trust_boundaries and
+    #    callback_registrations) and extended by 1-hop call-graph
+    #    closure to catch the immediate delegate function each
+    #    handler dispatches into. See module docstring for why this
+    #    is preferable to the earlier "cross-TU callees + roots"
+    #    over-collection.
+    anchor_set: set[str] = set()
 
-    def _add(name: Any) -> None:
+    def _add_anchor(name: Any) -> None:
         if isinstance(name, str) and name:
-            candidate_funcs.add(name)
+            anchor_set.add(name)
 
-    # 1a. Step 1's explicit attacker-input markers.
+    # 1a. trust_boundaries[].function — Step 1's explicit attacker-
+    #     input markers.
     for r in trust_rows:
-        _add(r.get("function"))
-    # 1b. Callback handlers + registration-site functions.
+        _add_anchor(r.get("function"))
+    # 1b. callback_registrations — handler body + registration-site
+    #     function. Both are "called by external dispatch" surfaces.
     for r in callback_rows:
-        _add(r.get("callback_function"))
-        _add(r.get("function"))
-    # 1c. Config / mode / command trigger handlers.
-    for r in all_config:
-        _add(r.get("function"))
+        _add_anchor(r.get("callback_function"))
+        _add_anchor(r.get("function"))
 
-    # 1d. Cross-TU callees — callees whose definition file differs
-    #     from the call-site file. Generic external-linkage
-    #     dispatch pattern of any modular C codebase. Uses the
-    #     same function -> definition-file map Step 3 retrieval
-    #     uses (calls deduce a definition file from rows whose
-    #     `file` pins the function's body, not its call site).
-    func_def_file = _function_def_file_map(cats)
-    for r in all_edges:
-        callee = r.get("callee")
-        call_site_file = r.get("file")
-        if not isinstance(callee, str) or not isinstance(call_site_file, str):
-            continue
-        def_file = func_def_file.get(callee)
-        if def_file and def_file != call_site_file:
-            candidate_funcs.add(callee)
-
-    # 1e. Call-graph roots — caller-but-never-callee. Program /
-    #     module / daemon entry points.
-    callers_set: set[str] = set()
-    callees_set: set[str] = set()
-    for r in all_edges:
-        c = r.get("caller")
-        ce = r.get("callee")
-        if isinstance(c, str):
-            callers_set.add(c)
-        if isinstance(ce, str):
-            callees_set.add(ce)
-    for fn in callers_set - callees_set:
-        candidate_funcs.add(fn)
-
-    # 1f. Callees of registered callback handlers. When an external
-    #     trigger fires a callback, the callback typically wraps an
-    #     internal dispatch function: the wrapped function is itself
-    #     an entry point because attacker-controlled bytes flow from
-    #     the callback into it. The shape is generic for any
-    #     layered protocol stack: a network-side callback wraps an
-    #     internal dispatch function that consumes the attacker's
-    #     bytes. Generic — adds the 1-hop dispatch targets of every
-    #     callback_function, no project name or symbol pattern.
-    callback_handlers: set[str] = set()
-    for r in callback_rows:
-        cb = r.get("callback_function")
-        if isinstance(cb, str):
-            callback_handlers.add(cb)
-        fn = r.get("function")
-        if isinstance(fn, str):
-            callback_handlers.add(fn)
+    # 1c. 1-hop callees of (1a) ∪ (1b). When an external trigger
+    #     fires a boundary or callback handler, the handler
+    #     typically delegates one hop further into an internal
+    #     dispatch function. That delegate is itself attacker-
+    #     reachable. Generic shape of any layered protocol stack;
+    #     no project name or symbol pattern.
+    candidate_funcs: set[str] = set(anchor_set)
     for r in all_edges:
         caller = r.get("caller")
         callee = r.get("callee")
-        if isinstance(caller, str) and caller in callback_handlers and isinstance(callee, str):
+        if isinstance(caller, str) and caller in anchor_set and isinstance(callee, str) and callee:
             candidate_funcs.add(callee)
 
     # 2. Neighborhood: call_graph edges where caller OR callee is a
@@ -397,61 +358,6 @@ def _load(substrate: dict | str | Path) -> dict[str, Any]:
     if isinstance(substrate, Path):
         return json.loads(substrate.read_text())
     return json.loads(substrate)
-
-
-def _function_def_file_map(cats: dict[str, Any]) -> dict[str, str]:
-    """Map ``function name -> definition file`` from substrate
-    categories whose ``file`` field pins the function's body.
-
-    Mirrors :func:`step3.retrieval._build_function_def_file_map`
-    so the cross-TU dispatch detection in
-    :func:`slice_substrate` resolves the same callee bodies Step 3
-    sees. Walks every category whose row's ``file`` field records
-    the function's body location:
-
-      - ``call_graph[caller=X]``: the call site is in X's body.
-      - ``data_control_flow[function=X]``, ``guards[function=X]``,
-        ``trust_boundaries[function=X]``,
-        ``callback_registrations[function=X]``: the file is the
-        body file for X.
-
-    NOT used: ``call_graph[callee=X]`` (its file is the call site,
-    not the callee's body) and
-    ``callback_registrations[callback_function=X]`` (its file is
-    the registration site).
-
-    When several files are seen for one name (cross-TU same-name
-    statics), the most-frequent file wins; ties broken by sorted
-    file order so the resolution is deterministic.
-
-    Project-agnostic: only generic substrate fields, no project
-    name or symbol pattern.
-    """
-    from collections import Counter
-
-    counts: dict[str, Counter[str]] = {}
-
-    def _bump(fn: object, file: object) -> None:
-        if not isinstance(fn, str) or not isinstance(file, str):
-            return
-        if fn not in counts:
-            counts[fn] = Counter()
-        counts[fn][file] += 1
-
-    for r in cats.get("call_graph", []):
-        _bump(r.get("caller"), r.get("file"))
-    for cat in (
-        "data_control_flow", "guards",
-        "trust_boundaries", "callback_registrations",
-    ):
-        for r in cats.get(cat, []):
-            _bump(r.get("function"), r.get("file"))
-
-    out: dict[str, str] = {}
-    for fn, c in counts.items():
-        ranked = sorted(c.items(), key=lambda p: (-p[1], p[0]))
-        out[fn] = ranked[0][0]
-    return out
 
 
 # --------------------------------------------------------------------------- #

@@ -206,10 +206,16 @@ def run(
             candidate_function=cand.get("function", ""),
             candidate_file=cand.get("file"),
         )
-        # Source excerpts of the candidate + 2-hop neighbourhood —
-        # same retrieval depth Step 3 uses (PLAN §3 N=2 hybrid).
-        # The verifier reads them to corroborate / refute substrate
-        # claims when a category label is sparse or misleading.
+        # Source excerpts of the candidate + 1-hop neighbourhood.
+        # The verifier's question is "is this candidate an
+        # entrypoint?" — answered by reading the candidate's body
+        # and its immediate callers / callees. 1 hop suffices.
+        # Step 3's IR synthesis (different concern: full attack
+        # chain from entry to sink) keeps the N=2 hybrid retrieval
+        # — that need does not apply here. A hop=2 walk on dense
+        # codebases pulls in 100-200 functions per verifier call;
+        # hop=1 typically pulls in ~10-30, which is the bulk of
+        # the per-call latency saving.
         excerpts: list[Any] = []
         if (
             source_root is not None
@@ -222,6 +228,7 @@ def run(
                     entry_function=cand.get("function", ""),
                     entry_file=cand.get("file", ""),
                     entry_line=cand.get("line"),
+                    hop_depth=1,
                 )
                 targets = [(n.file, n.function) for n in nbhd.nodes if n.file]
                 excerpts = list(_extract_excerpts(source_root, targets))

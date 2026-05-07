@@ -58,54 +58,51 @@ def test_callback_function_added_to_candidates():
     assert len(s.callback_registrations) == 1
 
 
-def test_cross_tu_callee_added_to_candidates():
-    """A function called from a file other than its own definition
-    file is a generic external-linkage / cross-TU dispatch target
-    (library export, layer-internal entry). The pool picks it up
-    even when no Step 1 category names the function — this is the
-    cut that recovers shared-API entrypoints like mbedtls'
-    ``mbedtls_ssl_read``."""
+def test_cross_tu_callee_NOT_added_unless_anchored():
+    """An anchor-based pool admits a callee only via 1-hop closure
+    over (trust_boundaries ∪ callback_registrations). A cross-TU
+    callee whose caller is itself unanchored is NOT added to the
+    pool — earlier revisions added every cross-TU callee as a
+    speculative cut, but that mixed high-precision attacker-input
+    markers with structural over-collection (most cross-TU callees
+    are internal helpers, not entrypoints). PLAN §6 Rule 2 is
+    satisfied by the verifier's per-candidate hop=2 + source-
+    aware critique, not by widening the pool here."""
     sub = _empty_substrate()
-    # Caller in api.c calls helper(); helper's body is in lib.c
-    # (registered via guards / data_control_flow rows that pin the
-    # body file — same source the def_file map uses).
+    # Caller in api.c (no trust/callback row) calls helper(). Both
+    # are project-internal symbols with no anchor, so neither
+    # enters the pool.
     sub["categories"]["call_graph"] = [
         {"caller": "api_call", "callee": "helper",
          "file": "api.c", "line": 10, "kind": "direct"},
     ]
     sub["categories"]["guards"] = [
-        # A guards row pins helper's body to lib.c.
         {"function": "helper", "file": "lib.c", "guard_call": "n>0",
          "guard_line": 5, "result_used": True},
     ]
     s = slice_substrate(sub)
-    # helper's def file is lib.c, call site is api.c -> cross-TU ✓
-    assert "helper" in s.candidate_functions
+    assert "helper" not in s.candidate_functions
+    assert "api_call" not in s.candidate_functions
 
 
 def test_intra_tu_callee_NOT_added_to_candidates():
     """A function called only from within its own definition file
-    is a local helper, not an entrypoint pattern. The cross-TU cut
-    intentionally excludes it so the pool stays bounded — the
-    chunked miner does not need to enumerate every static helper."""
+    is a local helper, not an entrypoint. Neither caller nor
+    callee enter the pool unless they're anchored (trust /
+    callback) or 1-hop downstream of an anchor."""
     sub = _empty_substrate()
     sub["categories"]["call_graph"] = [
         {"caller": "outer", "callee": "local_helper",
          "file": "f.c", "line": 10, "kind": "direct"},
     ]
-    # outer's body is in f.c (caller pins it); local_helper's body
-    # also in f.c via a guards row.
     sub["categories"]["guards"] = [
         {"function": "local_helper", "file": "f.c", "guard_call": "x",
          "guard_line": 5, "result_used": True},
     ]
     s = slice_substrate(sub)
-    # local_helper appears as callee but its def_file == call site
-    # -> NOT a cross-TU candidate. outer is a root (caller-but-
-    # never-callee) so it does enter the pool, but local_helper
-    # should not.
+    # No anchor -> no candidate.
     assert "local_helper" not in s.candidate_functions
-    assert "outer" in s.candidate_functions  # caller-but-never-callee
+    assert "outer" not in s.candidate_functions
 
 
 def test_callback_handler_callee_added_to_candidates():
@@ -173,11 +170,15 @@ def test_slice_for_candidate_chunk_call_graph_scoped_to_chunk_set_only():
     assert ("helper", "deeper") not in pairs
 
 
-def test_call_graph_root_added_to_candidates():
-    """A function that appears as a caller but never as a callee
-    is a generic program / module / daemon entry point (``main()``,
-    init, daemon entry). Picked up regardless of Step 1 category
-    membership."""
+def test_call_graph_root_NOT_added_unless_anchored():
+    """The earlier "every caller-but-never-callee is a candidate"
+    cut was an over-collection workaround for sparse Step 1
+    coverage. The anchor-based pool drops it: a root is admitted
+    only if it is itself an anchor (trust / callback) or a 1-hop
+    callee of one. Reasoning: many "roots" in extracted call
+    graphs are orphans whose callers were not extracted, not real
+    program entry points; treating every root as a candidate
+    pushed structural noise onto the LLM verifier."""
     sub = _empty_substrate()
     sub["categories"]["call_graph"] = [
         {"caller": "main", "callee": "do_work",
@@ -186,22 +187,42 @@ def test_call_graph_root_added_to_candidates():
          "file": "main.c", "line": 12, "kind": "direct"},
     ]
     s = slice_substrate(sub)
-    # main is caller-only -> root.
-    assert "main" in s.candidate_functions
-    # do_work and lib_func appear as callees, so they are not roots
-    # by this cut alone (do_work would also need cross-TU evidence
-    # to enter; here it's intra-file so it stays out).
-    assert "do_work" not in s.candidate_functions
-    assert "lib_func" not in s.candidate_functions
+    # No anchor row exists -> nothing in the pool, including main.
+    assert s.candidate_functions == []
 
 
-def test_call_graph_neighborhood_extracted():
-    """Every edge survives the relevance filter now that the
-    candidate pool is the union of every function name in the
-    substrate (Step 1 category labels are imperfect heuristics —
-    using them as a hard gate would silently drop downstream
-    candidates). The cap, not category-relevance, is what bounds
-    the slice."""
+def test_trust_boundary_callee_added_to_candidates():
+    """1-hop callee of a trust_boundary IS in the pool. When a
+    boundary handler delegates one hop further into an internal
+    dispatch function, that delegate is itself attacker-reachable
+    (bytes flow from the boundary into it)."""
+    sub = _empty_substrate()
+    sub["categories"]["trust_boundaries"].append({
+        "kind": "network_socket", "function": "recv_socket",
+        "file": "net.c", "line": 1, "direction": "untrusted_to_trusted",
+    })
+    sub["categories"]["call_graph"] = [
+        {"caller": "recv_socket", "callee": "handle_message",
+         "file": "net.c", "line": 12, "kind": "direct"},
+        # Indirect 2-hop callee — must NOT enter (anchor closure
+        # is 1-hop, deeper validation is the verifier's job).
+        {"caller": "handle_message", "callee": "deep_helper",
+         "file": "net.c", "line": 30, "kind": "direct"},
+    ]
+    s = slice_substrate(sub)
+    assert "recv_socket" in s.candidate_functions
+    assert "handle_message" in s.candidate_functions
+    assert "deep_helper" not in s.candidate_functions
+
+
+def test_call_graph_neighborhood_filtered_by_anchor_closure():
+    """Edges where neither endpoint is in the candidate pool are
+    dropped — only edges touching the anchor or its 1-hop closure
+    survive. ``(x, y)`` here has no anchor connection so its row
+    is filtered. ``(entry, helper)`` and ``(z, entry)`` both touch
+    the anchor (``entry`` is a trust_boundary; ``helper`` is a
+    1-hop callee of an anchor — they're both pool members; ``z``
+    is not, but the edge still survives because ``entry`` is)."""
     sub = _empty_substrate()
     sub["categories"]["trust_boundaries"].append({
         "kind": "network_socket", "function": "entry",
@@ -214,7 +235,7 @@ def test_call_graph_neighborhood_extracted():
     ]
     s = slice_substrate(sub)
     cg_pairs = sorted((e["caller"], e["callee"]) for e in s.call_graph)
-    assert cg_pairs == [("entry", "helper"), ("x", "y"), ("z", "entry")]
+    assert cg_pairs == [("entry", "helper"), ("z", "entry")]
 
 
 def test_guards_filtered_to_neighborhood():
@@ -293,11 +314,12 @@ def test_config_triggers_filtered_to_candidate_relevant_files():
 
 
 def test_call_edge_cap_bounds_slice_size():
-    """The ``max_call_edges`` cap bounds the slice. With the pool
-    expanded to every function name in the substrate, every edge is
-    candidate-relevant, so the cap is the sole size bound. The
-    round-robin selector keeps the per-candidate fairness so a
-    single high-degree candidate cannot starve others."""
+    """The ``max_call_edges`` cap bounds the slice. ``entry`` is the
+    anchor and its 1-hop callees ``helper_0..helper_49`` enter the
+    pool (50 candidates). Edges where neither endpoint is in the
+    pool (``x_i -> y_i``) are filtered first; among the 50
+    anchor-relevant edges the cap selects the first 30 via the
+    round-robin per-candidate selector."""
     sub = _empty_substrate()
     sub["categories"]["trust_boundaries"].append({
         "kind": "network_socket", "function": "entry",
