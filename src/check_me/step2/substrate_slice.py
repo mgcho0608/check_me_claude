@@ -26,6 +26,14 @@ from substrate categories the schema defines:
  5. ``call_graph`` roots — functions that appear as a caller but
     never as a callee. Generic program / module / daemon entry
     points (``main()``, init functions, library construct hooks).
+ 6. Callees of registered callback handlers — when an external
+    trigger fires a callback and the callback wraps an internal
+    dispatch function, the dispatch function is itself an entry
+    point (attacker-controlled bytes flow from the callback into
+    it). Generic shape of any layered protocol / event handler:
+    ``recv_callback -> process_request`` regardless of whether
+    ``process_request`` is in the same TU. Closes the gap (4) leaves
+    when the dispatch happens within the callback's TU.
 
 This split is principled and project-agnostic: every cut roots in
 a language standard or schema-defined category, none branches on a
@@ -282,6 +290,29 @@ def slice_substrate(
             callees_set.add(ce)
     for fn in callers_set - callees_set:
         candidate_funcs.add(fn)
+
+    # 1f. Callees of registered callback handlers. When an external
+    #     trigger fires a callback, the callback typically wraps an
+    #     internal dispatch function: the wrapped function is itself
+    #     an entry point because attacker-controlled bytes flow from
+    #     the callback into it (libssh's
+    #     ssh_packet_socket_callback -> ssh_packet_process is the
+    #     canonical case; same shape appears in any layered protocol
+    #     stack). Generic — adds the 1-hop dispatch targets of every
+    #     callback_function, no project name or symbol pattern.
+    callback_handlers: set[str] = set()
+    for r in callback_rows:
+        cb = r.get("callback_function")
+        if isinstance(cb, str):
+            callback_handlers.add(cb)
+        fn = r.get("function")
+        if isinstance(fn, str):
+            callback_handlers.add(fn)
+    for r in all_edges:
+        caller = r.get("caller")
+        callee = r.get("callee")
+        if isinstance(caller, str) and caller in callback_handlers and isinstance(callee, str):
+            candidate_funcs.add(callee)
 
     # 2. Neighborhood: call_graph edges where caller OR callee is a
     #    candidate. Edges are distributed across candidates with a
@@ -830,14 +861,23 @@ def slice_for_candidate_chunk(
     #    relevant_files set.
 
     # ---- Bulk reduction (scoped) ---------------------------------
-    # Direct call_graph edges scoped to chunk neighbourhood. Indirect
+    # Direct call_graph edges scoped to the chunk's *assigned*
+    # candidates only — i.e. edges where chunk_set is the caller
+    # or the callee. The previous "endpoint in hop=N neighborhood"
+    # filter pulled in every internal edge between neighbour
+    # functions, blowing the per-chunk slice past 3000 edges on
+    # well-connected codebases (libssh, dnsmasq) where chunk_set's
+    # 30 dispatchers each have ~20-100 1-hop neighbours and the
+    # induced subgraph balloons. The chunk miner only needs to see
+    # how each chunk_set candidate is invoked / what it dispatches
+    # into — internal chains between non-candidate neighbours are
+    # the verifier's job (per-candidate hop=2 + source). Indirect
     # edges from chunk candidates are merged in (dedup by id) so
-    # Part B sees its evidence regardless of whether the indirect
-    # endpoint is in the neighbourhood.
+    # Part B sees its dispatch evidence regardless.
     direct_edges = [
         e for e in full.call_graph
         if e.get("kind") != "indirect"
-        and (e.get("caller") in neighborhood or e.get("callee") in neighborhood)
+        and (e.get("caller") in chunk_set or e.get("callee") in chunk_set)
     ]
     seen_edge_ids: set[int] = set()
     chunk_edges: list[dict[str, Any]] = []

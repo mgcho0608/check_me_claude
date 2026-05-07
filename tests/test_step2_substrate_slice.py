@@ -108,6 +108,71 @@ def test_intra_tu_callee_NOT_added_to_candidates():
     assert "outer" in s.candidate_functions  # caller-but-never-callee
 
 
+def test_callback_handler_callee_added_to_candidates():
+    """When an external trigger fires a callback and the callback
+    wraps an internal dispatch function, the dispatch function is
+    itself an entry point — attacker-controlled bytes flow from
+    the callback into it. libssh's
+    ``ssh_packet_socket_callback -> ssh_packet_process`` is the
+    canonical case; same layered-protocol shape appears in any C
+    codebase. Generic 1-hop closure over registered callbacks."""
+    sub = _empty_substrate()
+    # Callback registered via function-table.
+    sub["categories"]["callback_registrations"].append({
+        "registration_site": "table[]",
+        "callback_function": "recv_callback",
+        "file": "net.c", "line": 5, "kind": "function_table",
+    })
+    # Callback dispatches to a same-TU helper.
+    sub["categories"]["call_graph"] = [
+        {"caller": "recv_callback", "callee": "process_request",
+         "file": "net.c", "line": 12, "kind": "direct"},
+    ]
+    s = slice_substrate(sub)
+    assert "recv_callback" in s.candidate_functions
+    # The 1-hop dispatch target is itself an entrypoint.
+    assert "process_request" in s.candidate_functions
+
+
+def test_slice_for_candidate_chunk_call_graph_scoped_to_chunk_set_only():
+    """The chunk slice's call_graph contains edges where chunk_set
+    is endpoint (caller or callee) — *not* the induced subgraph of
+    the hop=N neighbourhood. Internal edges between neighbour
+    functions belong to the verifier's per-candidate slice (hop=2
+    + source); the chunk miner only needs to see how each
+    chunk_set candidate is invoked and what it dispatches into."""
+    from check_me.step2.substrate_slice import (
+        slice_for_candidate_chunk,
+        slice_substrate,
+    )
+    sub = _empty_substrate()
+    sub["categories"]["trust_boundaries"].append({
+        "kind": "network_socket", "function": "entry",
+        "file": "f.c", "line": 1, "direction": "untrusted_to_trusted",
+    })
+    sub["categories"]["call_graph"] = [
+        # entry's edges (chunk_set endpoint) — KEPT.
+        {"caller": "entry", "callee": "helper",
+         "file": "f.c", "line": 5, "kind": "direct"},
+        {"caller": "outer", "callee": "entry",
+         "file": "g.c", "line": 3, "kind": "direct"},
+        # Internal edge between two neighbours — DROPPED in the
+        # chunk slice (verifier sees it via hop=2).
+        {"caller": "helper", "callee": "deeper",
+         "file": "f.c", "line": 8, "kind": "direct"},
+    ]
+    full = slice_substrate(sub)
+    chunk_slice = slice_for_candidate_chunk(
+        full, chunk_candidates=["entry"], hop_depth=1,
+    )
+    pairs = sorted(
+        (e["caller"], e["callee"]) for e in chunk_slice.call_graph
+    )
+    assert ("entry", "helper") in pairs
+    assert ("outer", "entry") in pairs
+    assert ("helper", "deeper") not in pairs
+
+
 def test_call_graph_root_added_to_candidates():
     """A function that appears as a caller but never as a callee
     is a generic program / module / daemon entry point (``main()``,
