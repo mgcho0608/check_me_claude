@@ -543,6 +543,68 @@ def test_slice_for_candidate_disambiguates_same_name_overloads():
     assert guard_files == ["api.c"], guard_files
 
 
+def test_slice_for_candidate_chunk_scopes_candidate_functions_to_chunk():
+    """The chunk slice's ``candidate_functions`` lists only the
+    chunk's assigned subset, not the full pool. Serialising the
+    full pool inflates per-chunk prompt tokens without helping
+    Part B (whose vocabulary is callback_registrations / indirect
+    edges / trust_boundaries — not a list of names)."""
+    from check_me.step2.substrate_slice import (
+        slice_for_candidate_chunk,
+        slice_substrate,
+    )
+    sub = _empty_substrate()
+    # Three trust-boundary functions become candidates; chunk
+    # processes only one of them.
+    for fn in ("a", "b", "c"):
+        sub["categories"]["trust_boundaries"].append({
+            "kind": "network_socket", "function": fn,
+            "file": f"{fn}.c", "line": 1,
+            "direction": "untrusted_to_trusted",
+        })
+    full = slice_substrate(sub)
+    assert set(full.candidate_functions) >= {"a", "b", "c"}
+    chunk_slice = slice_for_candidate_chunk(
+        full, chunk_candidates=["b"], hop_depth=2,
+    )
+    assert chunk_slice.candidate_functions == ["b"]
+
+
+def test_slice_for_candidate_chunk_scopes_config_triggers_to_chunk_files():
+    """``config_mode_command_triggers`` in the chunk slice is
+    file-scoped to the chunk neighbourhood (same posture as
+    evidence_anchors). Cross-chunk gates outside the chunk's files
+    are dropped — the chunk's Part A reasoning does not need them.
+    Real-project mode/CLI gates can run 1500-2000 rows; the FULL-
+    keep behaviour was the single largest token-budget consumer
+    in the chunk slice."""
+    from check_me.step2.substrate_slice import (
+        slice_for_candidate_chunk,
+        slice_substrate,
+    )
+    sub = _empty_substrate()
+    sub["categories"]["trust_boundaries"].append({
+        "kind": "network_socket", "function": "entry",
+        "file": "f.c", "line": 1, "direction": "untrusted_to_trusted",
+    })
+    sub["categories"]["call_graph"] = [
+        {"caller": "entry", "callee": "helper",
+         "file": "f.c", "line": 5, "kind": "direct"},
+    ]
+    sub["categories"]["config_mode_command_triggers"] = [
+        # In chunk-relevant file — kept.
+        {"kind": "ifdef", "name": "WITH_X", "file": "f.c", "line": 5},
+        # In an unrelated file — dropped.
+        {"kind": "ifdef", "name": "WITH_Z", "file": "z.c", "line": 1},
+    ]
+    full = slice_substrate(sub)
+    chunk_slice = slice_for_candidate_chunk(
+        full, chunk_candidates=["entry"], hop_depth=2,
+    )
+    cfg_names = {c["name"] for c in chunk_slice.config_mode_command_triggers}
+    assert cfg_names == {"WITH_X"}
+
+
 def test_no_dataset_specific_branching():
     """The slicer must not behave differently for any specific
     project name. Same logical input + different project name →

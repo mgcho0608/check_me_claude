@@ -684,25 +684,42 @@ def slice_for_candidate_chunk(
       ``caller`` of ``call_graph[kind=indirect]`` edges whose
       ``callee`` set overlaps with ``callback_registrations``.
       So Part B's discovery vocabulary is:
-        - all callback_registrations rows (the registered handler
-          set), because Part B's claim is "is the callee
-          registered as a callback elsewhere?",
+        - callback_registrations rows whose handler/registration
+          touches the chunk neighbourhood (Part B's claim is "is
+          the callee registered as a callback elsewhere?" — the
+          chunk-relevant subset suffices),
         - all indirect call_graph edges originating from any
           chunk-assigned candidate (the dispatch evidence
           itself),
         - all trust_boundaries (cross-cutting attacker-input
-          surface; small),
-        - all config_mode_command_triggers (mode/CLI gates;
-          small).
-      These four are kept FULL regardless of chunk membership.
+          surface; small).
 
-      Bulk reduction comes from scoping ``call_graph[kind=direct]``,
-      ``guards`` and ``evidence_anchors`` to the chunk's ``hop_depth``-
-      neighbourhood (union of each candidate's BFS over the call
-      graph). On contiki-class projects this is the 95% of the
-      slice mass that gets trimmed; on libssh-class projects the
-      neighbourhood is most of the graph anyway and the projection
-      is a no-op-ish 5-10% reduction.
+      Bulk reduction comes from scoping
+      ``call_graph[kind=direct]``, ``guards``,
+      ``evidence_anchors``, AND ``config_mode_command_triggers``
+      to the chunk's ``hop_depth``-neighbourhood (union of each
+      candidate's BFS over the call graph). config_mode_command_
+      triggers used to be kept FULL on the assumption that the
+      slice-level cap kept the row count tame, but on real
+      projects (lwip 1808 rows, mbedtls 2000, sudo 1517) it was
+      the single largest token-budget consumer in the chunk
+      slice — pushing per-chunk prompts past qwen3.6-27b's 262K
+      context window. The chunk-relevant subset gives Part A the
+      gates that actually apply to the chunk; Part B's
+      cross-chunk discovery does not consult cfg.
+
+      ``candidate_functions`` is scoped to the chunk's assigned
+      subset for the same reason — Part B's vocabulary
+      (callback_registrations + indirect call edges + trust
+      boundaries) does not include a list of candidate names, so
+      serialising 200-2500 of them per chunk only inflates the
+      prompt. Per-chunk Part A responsibility is delimited by the
+      user-message chunk block (see build_miner_messages).
+
+      On contiki-class projects this is the 95% of the slice
+      mass that gets trimmed; on libssh-class projects the
+      neighbourhood is most of the graph anyway and the
+      projection is a no-op-ish 5-10% reduction.
 
     Project-agnostic. Walks substrate fields the schema defines —
     no project-name or symbol-pattern branching. The same rule
@@ -775,9 +792,18 @@ def slice_for_candidate_chunk(
     #    surface; in practice small (tens-to-low-hundreds rows).
     trust = list(full.trust_boundaries)
 
-    # 4. config_mode_command_triggers — kept FULL. Mode/CLI gates;
-    #    cross-cutting and pre-capped at slice_substrate level.
-    cfg = list(full.config_mode_command_triggers)
+    # 4. config_mode_command_triggers — file-scoped to chunk
+    #    neighbourhood (same posture as evidence_anchors below).
+    #    Originally kept FULL on the assumption that the slice-
+    #    level cap kept the row count tame, but on real projects
+    #    the cap room (1500-2000 rows of mode/CLI gates) was the
+    #    single largest token-budget consumer in the chunk slice
+    #    — pushing per-chunk prompts past qwen3.6-27b's 262K
+    #    context window. The chunk-relevant subset gives Part A
+    #    the gates that actually apply to the chunk's candidates;
+    #    cross-chunk discovery (Part B) does not consult cfg.
+    #    Computed below alongside anchors using the same
+    #    relevant_files set.
 
     # ---- Bulk reduction (scoped) ---------------------------------
     # Direct call_graph edges scoped to chunk neighbourhood. Indirect
@@ -799,15 +825,19 @@ def slice_for_candidate_chunk(
 
     guards = [g for g in full.guards if g.get("function") in neighborhood]
 
-    # evidence_anchors scoped by file — files containing any
-    # neighbourhood-relevant row (trust + callbacks + edges +
-    # guards). Same rule as slice_substrate's relevant_files
-    # filter, applied at chunk granularity.
+    # File-scope filter applied to both anchors and config triggers
+    # — files containing any neighbourhood-relevant row (trust +
+    # callbacks + edges + guards). Same rule as slice_substrate's
+    # relevant_files filter, applied at chunk granularity.
     relevant_files: set[str] = set()
     for r in trust + chunk_callbacks + chunk_edges + guards:
         f = r.get("file")
         if isinstance(f, str):
             relevant_files.add(f)
+    cfg = [
+        c for c in full.config_mode_command_triggers
+        if c.get("file") in relevant_files
+    ]
     anchors = [
         a for a in full.evidence_anchors
         if a.get("file") in relevant_files
@@ -816,11 +846,16 @@ def slice_for_candidate_chunk(
     return SubstrateSlice(
         project=full.project,
         cve=full.cve,
-        # Keep the FULL candidate_functions list visible — Part B
-        # may discover entrypoints outside the chunk's assigned
-        # subset, and the user message's chunk_block already
-        # delimits the chunk's per-Part-A responsibility.
-        candidate_functions=list(full.candidate_functions),
+        # Restrict candidate_functions to the chunk's assigned
+        # subset. Part B's cross-chunk discovery rule reads
+        # callback_registrations + indirect call_graph edges +
+        # trust_boundaries (its actual vocabulary) — the full
+        # candidate_functions list is not part of Part B's
+        # discovery surface and serialising 200-2500 names per
+        # chunk only inflates the prompt. Per-chunk Part A
+        # responsibility is delimited by the user-message chunk
+        # block (see build_miner_messages).
+        candidate_functions=sorted(chunk_set),
         trust_boundaries=trust,
         callback_registrations=chunk_callbacks,
         config_mode_command_triggers=cfg,
