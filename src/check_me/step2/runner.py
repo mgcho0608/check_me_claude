@@ -28,6 +28,7 @@ from .substrate_slice import (
     SubstrateSlice,
     slice_for_candidate,
     slice_substrate,
+    synthetic_candidates_from_substrate,
 )
 
 # Source-excerpt extraction for the verifier slice. Imported from
@@ -59,6 +60,8 @@ class RunReport:
     slice_counts: dict[str, int]
     miner_chunks: list[dict[str, Any]]
     candidates_proposed: int
+    synthetic_count: int = 0
+    discovered_count: int = 0
     verifier_calls: list[dict[str, Any]] = field(default_factory=list)
     kept: int = 0
     quarantined: int = 0
@@ -89,14 +92,23 @@ def run(
 ) -> tuple[dict[str, Any], RunReport]:
     """Run Step 2 end-to-end (lossless architecture).
 
-    Step 2's miner is chunked: every function in the substrate
-    slice's ``candidate_functions`` is sent through some chunk's
-    miner call. Each chunk also carries an explicit cross-chunk
-    discovery instruction so the LLM can propose entrypoints
-    outside the candidate set when it spots cross-substrate
-    patterns (indexed dispatchers etc.). The merged candidate list
-    is then verified — every row receives an independent verifier
-    critique with anchoring prevention.
+    Two streams feed the verifier:
+
+      (1) Deterministic synthetic candidates built directly from
+          substrate cuts (anchors + 1-hop closure + call-graph
+          roots). The LLM miner does NOT process these — its
+          per-candidate enumeration was pure redundancy because
+          the verifier is anchoring-blind (PLAN §0 / Rule 2b)
+          and ignores miner-side reasoning.
+      (2) Discovery-only miner output. The miner is chunked over
+          the same pool for substrate-projection size bounding,
+          but its task is to propose NEW entrypoints the cuts
+          missed (most importantly indexed dispatchers).
+          Empty miner output is the common and correct case.
+
+    Both streams merge into one list, are renumbered EP-001 …,
+    then each candidate gets an independent verifier critique
+    with anchoring prevention.
 
     Resilience: a single verifier failure does not kill the whole
     run. Each verifier call is wrapped; on raised exception (e.g.
@@ -159,7 +171,18 @@ def run(
         # so any client-side state is isolated).
         verifier_client = make_client(verifier_config)
 
-    # 1. Miner (chunked, parallel) -------------------------------------------
+    # 1a. Deterministic synthetic candidates --------------------------------
+    # Substrate cuts produce a candidate pool the verifier can
+    # consume directly. Bypassing the miner on these saves the
+    # LLM call cost of per-candidate enumeration, which the
+    # verifier ignores anyway (Rule 2b).
+    synthetic = synthetic_candidates_from_substrate(substrate_dict)
+    logger.info(
+        "step2.synthetic: %d substrate-origin candidates (deterministic, "
+        "bypass miner)", len(synthetic),
+    )
+
+    # 1b. Miner (chunked, parallel) — DISCOVERY only ------------------------
     logger.info("step2.miner: starting on slice %s", slice_.row_counts())
     miner_result = miner_mod.mine_chunked(
         client=miner_client,
@@ -171,10 +194,48 @@ def run(
         chunk_hop_depth=miner_chunk_hop_depth,
         chat_fn=chat_fn,
     )
-    proposed: list[dict[str, Any]] = miner_result.parsed.get("candidates", [])
+    discovered: list[dict[str, Any]] = miner_result.parsed.get("candidates", [])
     logger.info(
-        "step2.miner: %d chunks -> %d unique candidate(s)",
-        len(miner_result.per_chunk), len(proposed),
+        "step2.miner: %d chunks -> %d new candidate(s) discovered",
+        len(miner_result.per_chunk), len(discovered),
+    )
+
+    # 1c. Merge synthetic + discovered, renumber ids globally ---------------
+    # Synthetic is dedup'd already (one row per function name);
+    # mine_chunked also filters its output against known_candidates.
+    # Final dedup by (function, file) protects against a synthetic
+    # row whose body file disagreement happens to collide with a
+    # discovered row's file (rare; if it occurs we keep the
+    # synthetic — it has provenance to a substrate row).
+    proposed: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str | None, str | None]] = set()
+    seen_funcs: set[str] = set()
+    for cand in synthetic:
+        key = (cand.get("function"), cand.get("file"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        if isinstance(cand.get("function"), str):
+            seen_funcs.add(cand["function"])
+        proposed.append(cand)
+    for cand in discovered:
+        fn = cand.get("function")
+        if isinstance(fn, str) and fn in seen_funcs:
+            continue
+        key = (fn, cand.get("file"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        if isinstance(fn, str):
+            seen_funcs.add(fn)
+        proposed.append(cand)
+    proposed.sort(key=lambda c: (c.get("file") or "", c.get("function") or ""))
+    for i, cand in enumerate(proposed, 1):
+        cand["id"] = f"EP-{i:03d}"
+    logger.info(
+        "step2: %d total candidate(s) for verifier "
+        "(synthetic=%d + discovered=%d)",
+        len(proposed), len(synthetic), len(discovered),
     )
 
     # 2. Verifier (parallel first pass, sequential retry passes) ------------
@@ -361,6 +422,8 @@ def run(
         slice_counts=slice_.row_counts(),
         miner_chunks=miner_result.per_chunk,
         candidates_proposed=len(proposed),
+        synthetic_count=len(synthetic),
+        discovered_count=len(discovered),
         verifier_calls=verifier_calls,
         kept=kept,
         quarantined=quarantined,

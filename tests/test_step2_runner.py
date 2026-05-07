@@ -310,17 +310,43 @@ def test_runner_output_validates_against_entrypoints_schema():
 
 
 def test_empty_miner_output_yields_empty_entrypoints():
-    seq = _SequencedChat([_resp({"candidates": []})])
+    """If neither the substrate nor the miner produces any
+    candidates, the run completes with zero entrypoints and zero
+    verifier calls. Substrate must be truly empty (no anchor
+    rows, no roots) — the runner builds deterministic synthetic
+    rows from substrate cuts before invoking the miner, and any
+    anchor would produce one of those."""
+    truly_empty = {
+        "schema_version": "v1",
+        "project": "test_proj",
+        "cve": "CVE-T",
+        "categories": {
+            "call_graph": [],
+            "data_control_flow": [],
+            "guards": [],
+            "trust_boundaries": [],
+            "config_mode_command_triggers": [],
+            "callback_registrations": [],
+            "evidence_anchors": [],
+        },
+    }
+    # Even with empty substrate the chunked miner is called once
+    # (with no chunks, returning empty). The fake_chat allows one
+    # call and asserts the no-canned-response path is the verifier
+    # not being invoked.
+    seq = _SequencedChat([])
     output, report = runner_mod.run(
-        _empty_substrate(),
+        truly_empty,
         miner_config=_cfg(), verifier_config=_cfg(),
         miner_client="m", verifier_client="v",
         chat_fn=seq,
     )
     assert output["entrypoints"] == []
     assert report.candidates_proposed == 0
-    # No verifier calls when no candidates.
-    assert len(seq.calls) == 1
+    assert report.synthetic_count == 0
+    assert report.discovered_count == 0
+    # No miner call (zero chunks), no verifier call (zero candidates).
+    assert len(seq.calls) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -345,14 +371,12 @@ class _FlakyChat:
 
     def __call__(self, client, config, request: ChatRequest) -> ChatResponse:
         self.calls.append({"client": client})
-        # Heuristic: miner prompt is the only one whose user message
-        # mentions "Assigned candidates" (the chunked miner) or
-        # "no chunking" (the single-call backwards-compat path).
+        # Miner prompt has the "Known candidates" header and a
+        # "Substrate-projection focus" / "no chunking" / "single-
+        # call" marker. Verifier prompt has none of these — it
+        # carries "Entrypoint candidate (structural only".
         user_msg = request.messages[-1]["content"]
-        is_miner = (
-            "Assigned candidates" in user_msg or "no chunking" in user_msg
-            or "single-call" in user_msg
-        )
+        is_miner = "Known candidates" in user_msg
         if is_miner:
             return self.miner_resp
         # Verifier branch.

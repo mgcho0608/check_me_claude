@@ -2,28 +2,39 @@
 
 The miner and verifier are intentionally separate prompts so the
 verifier never sees the miner's chain of thought (PLAN.md §0,
-"anchoring prevention"). Information flow:
+"anchoring prevention").
 
-    miner   <- substrate slice
-    miner   -> structural candidates (function/file/line/trigger_type
-                                       + supporting_substrate_edges
-                                       + reachability/controllability
-                                       text + confidence/uncertainty)
+Miner role (post per-candidate-redundancy removal):
+
+The deterministic substrate cuts (anchors + 1-hop closure +
+call-graph roots — see ``substrate_slice.slice_substrate``) already
+produce a candidate pool that the runner forwards to the verifier
+as deterministic synthetic rows. The miner therefore does NOT
+re-enumerate substrate-origin candidates; it focuses on cross-
+substrate DISCOVERY of entrypoints that the deterministic cuts
+miss. The most important shape is the indexed-dispatch pattern
+(`handlers[wire_byte](args)`-style runtime function-pointer
+selection), but other patterns recur — runtime callback
+installations, config / mode trigger handlers whose function name
+isn't in callback_registrations, etc. The miner reports any
+candidate it discovers that is NOT already in the known pool.
+
+Information flow:
+
+    runner   -> deterministic synthetic pool (from substrate cuts)
+    miner    <- substrate slice + known candidate names
+    miner    -> NEW candidates only (not in known list)
+    runner   -> merges synthetic + miner output -> verifier
 
     verifier <- substrate slice + ONE candidate's STRUCTURAL fields
-                 (function/file/line/trigger_type/supporting_edges).
-                 The miner's reachability / controllability / uncertainty
-                 prose is NOT included.
-    verifier -> verdict (kept | quarantined) + structured critique
-                 (reachability/controllability/assumptions/refuting_edges)
-                 + confidence/uncertainty.
-
-The runner then merges the miner's structural fields with the
-verifier's verdict to produce ``entrypoints.v1.json``-shaped rows.
+                 (function/file/line/trigger_type/supporting_edges)
+                 + 1-hop source excerpts. Miner reasoning is
+                 stripped before it reaches the verifier.
+    verifier -> verdict (kept | quarantined) + structured critique.
 
 Prompts are deliberately project-agnostic — they reference the
-schema-level vocabulary ("trust_boundaries", "callback_registrations",
-…) but never the names of test corpora.
+schema-level vocabulary ("trust_boundaries",
+"callback_registrations", …) but never the names of test corpora.
 """
 
 from __future__ import annotations
@@ -40,92 +51,73 @@ from .substrate_slice import SubstrateSlice
 
 
 _MINER_SYSTEM = """\
-You are a security-analysis assistant doing entrypoint mining for a
-deterministic substrate extractor. The user gives you:
+You are a security-analysis assistant doing entrypoint DISCOVERY
+for a deterministic substrate extractor. The user gives you:
 
   (1) a JSON "substrate slice" — full project context (trust
       boundaries, callback registrations, configuration triggers,
       call graph slice, guards, evidence anchors);
-  (2) an "assigned candidates" list — a chunk of function names
-      drawn from the slice's `candidate_functions` array. The full
-      candidate set is processed across multiple chunks in parallel;
-      this call handles only the chunk listed.
+  (2) a "known candidates" list — function names already produced
+      by deterministic substrate cuts (anchors and 1-hop closure
+      and call-graph roots). Those are independently being
+      verified; your output must NOT contain any of them.
 
-Your task has two parts:
+Your task is to find runtime entrypoints that the substrate cuts
+miss but the substrate evidence indicates. Empty output is the
+common and correct case when nothing new is warranted.
 
-PART A — Per-candidate enumeration (the recall guarantee).
-
-  For EVERY function name in the assigned candidates list, emit
-  exactly one candidate row. Skipping is NOT permitted. If you
-  doubt the entrypoint claim, still emit the row and let
-  `confidence: low` + `uncertainty` express the doubt — a
-  separate verifier LLM will critique each row independently with
-  burden of proof and quarantine weak claims with structured
-  refuting_substrate_edges. Picking which candidates "survive" is
-  the verifier's job, not yours; your job is to make sure the
-  verifier sees every candidate.
-
-  This division of labour is the foundation of Step 2: false
-  positives at your layer are recoverable (they land in the
-  quarantined bucket), false negatives are NOT — the verifier
-  never sees candidates you didn't propose.
-
-PART B — Cross-chunk discovery (the LLM value-add).
-
-  The deterministic substrate extractor (Step 1) emits
-  `candidate_functions` from the trust_boundaries and
-  callback_registrations categories. There are runtime entrypoints
-  it cannot mechanically detect — most importantly the
-  indexed-dispatch pattern, where a function selects a registered
-  handler from a table by attacker-controlled bytes (e.g.
-  `handlers[wire_byte](args)`, syscall-table dispatch, event-loop
-  fan-out by message type). Such a function is reached only by an
-  internal direct call from its parent, but it IS an entrypoint
-  because the attacker controls the dispatch index.
-
-  Recognise the pattern from the substrate as: a function
+Most important pattern — INDEXED DISPATCH:
+  A function selecting a registered handler from a table by
+  attacker-controlled bytes (e.g. `handlers[wire_byte](args)`,
+  syscall-table dispatch, event-loop fan-out by message type).
+  Such a function is reached only by an internal direct call
+  from its parent, but it IS an entrypoint because the attacker
+  controls the dispatch index. Recognise it as: a function
   appearing as `caller` in several `call_graph` edges of `kind:
-  indirect` whose `callee` set overlaps with functions present in
-  `callback_registrations`. If you observe such a function (or any
-  other plausible entrypoint pattern) NOT already in the assigned
-  candidates list, emit a row for it too — propose it with
-  `trigger_type: unknown` and `trigger_ref` noting "indexed
-  dispatcher over <table-name>" (or whichever pattern applies).
-  Discovery instructions apply to every chunk: the merged miner
-  output dedupes by (function, file).
+  indirect` whose `callee` set overlaps with functions present
+  in `callback_registrations`. The dispatcher itself is the new
+  entrypoint candidate.
 
-  This pattern is generic to any C codebase (protocol parsers,
-  syscall tables, event loops, vtables driven by external bytes);
-  it is not project-specific.
+Other patterns where discovery may apply (each is generic to any
+C codebase, never project-specific):
+  - callbacks installed via runtime APIs whose registration was
+    not captured by the AST extractor (look for indirect
+    call_graph edges that target functions not in the known
+    list);
+  - config / mode / command trigger handlers whose function name
+    appears in evidence_anchors but not in
+    callback_registrations.
 
-For each row you must:
+For each NEW row you emit, you must:
 
 - name the function and pin its file + (where applicable) line,
 - pick a trigger_type from this fixed enum: command, config,
-  callback, event, boot_phase, unknown. If none fits cleanly,
-  use unknown and explain why in the trigger_ref text,
-- cite at least one supporting substrate row (its category and key
-  identifying fields),
+  callback, event, boot_phase, unknown. Use unknown when the
+  fit is approximate; explain in trigger_ref text,
+- cite at least one supporting substrate row (its category and
+  key identifying fields),
 - describe reachability — under what runtime conditions is this
-  function reached? — and attacker_controllability — to what extent
-  can an attacker shape the input by the time it arrives?
-- assign a confidence: high | medium | low (this reflects YOUR
-  subjective strength on the entrypoint claim),
-- record uncertainty — what specifically you are unsure about and
-  why.
+  function reached? — and attacker_controllability — to what
+  extent can an attacker shape the input by the time it arrives?
+- assign a confidence: high | medium | low,
+- record uncertainty — what specifically you are unsure about
+  and why.
 
 Hard constraints:
 
 - Reply with a single JSON object — no prose, no markdown fences.
+- DO NOT emit a row for any function that appears in the known
+  candidates list. Those are handled separately; re-emitting them
+  is wasted work and will be discarded.
+- Empty list is the expected default. Only emit when substrate
+  evidence positively supports a new entrypoint claim.
 - Do NOT invent file paths or line numbers. Only cite values that
   appear in the substrate slice.
 - Do NOT use dataset-specific knowledge. Reason only from the
   substrate slice provided in this conversation.
-- A function on the egress / output side (e.g. send-only API
-  wrappers, serialisers writing to a buffer) is NOT an
-  entrypoint — emit the row anyway with `confidence: low` and
-  `trigger_ref` noting the egress reasoning so the verifier can
-  quarantine on a clear refutation.
+- A function on the egress / output side (send-only wrappers,
+  serialisers writing to a buffer) is NOT an entrypoint — do not
+  emit it.
 """
 
 _MINER_OUTPUT_SHAPE = """\
@@ -135,7 +127,7 @@ The output JSON must have this shape:
   "candidates": [
     {
       "id": "EP-001",
-      "function": "<function name from substrate>",
+      "function": "<function name — must NOT be in the known list>",
       "file": "<file path from substrate>",
       "line": <integer or null>,
       "trigger_type": "command | config | callback | event | boot_phase | unknown",
@@ -143,7 +135,7 @@ The output JSON must have this shape:
       "reachability": "<text>",
       "attacker_controllability": "<text>",
       "supporting_substrate_edges": [
-        "<short citation, e.g. 'trust_boundaries[function=foo]' or 'callback_registrations[callback_function=bar]'>"
+        "<short citation, e.g. 'call_graph[caller=foo, kind=indirect]'>"
       ],
       "confidence": "high | medium | low",
       "uncertainty": "<text>"
@@ -151,9 +143,10 @@ The output JSON must have this shape:
   ]
 }
 
-ids run sequentially EP-001, EP-002, … . Use null for line when no
-substrate row pins one. Empty list is permitted if no candidate is
-warranted.
+ids run sequentially EP-001, EP-002, … among new discoveries; the
+runner globally renumbers when merging with the deterministic
+synthetic pool. Use null for line when no substrate row pins one.
+Empty list is the expected default.
 """
 
 
@@ -161,35 +154,58 @@ def build_miner_messages(
     slice_: SubstrateSlice,
     *,
     chunk: list[str] | None = None,
+    known_candidates: list[str] | None = None,
 ) -> tuple[str, str]:
-    """Return ``(system, user)`` prompts for the miner.
+    """Return ``(system, user)`` prompts for the discovery miner.
 
-    ``chunk`` is the assigned-candidates list for this miner call —
-    a slice of ``slice_.candidate_functions``. The full candidate
-    set is processed across multiple chunks (each in a fresh LLM
-    session), and the merged output dedupes by ``(function, file)``.
-    When ``chunk`` is None, the miner is told to enumerate every
-    function in ``candidate_functions``; this is mainly a unit-test
-    backwards-compat path. Production runs always supply a chunk.
+    ``known_candidates`` is the project-wide list of names already
+    in the deterministic synthetic pool (anchors + 1-hop closure
+    + call-graph roots from substrate cuts). The miner is
+    explicitly forbidden from re-emitting these — its job is to
+    find new entrypoints the cuts missed (most importantly
+    indexed dispatchers). When None, the slice's
+    ``candidate_functions`` field is used as the known set.
+
+    ``chunk`` exists for substrate-projection bounding when called
+    from ``mine_chunked`` on large projects: the chunk's assigned
+    subset informs which substrate rows are kept in the slice
+    projection. Even when chunked, ``known_candidates`` should be
+    the FULL project pool so the miner doesn't propose a function
+    that another chunk already has covered.
     """
+    if known_candidates is None:
+        known_candidates = list(slice_.candidate_functions)
+    known_set = sorted(set(known_candidates))
+    known_block_lines = [
+        f"Known candidates ({len(known_set)} function names — DO NOT"
+        " emit rows for any of these; only emit NEW discoveries):"
+    ]
+    if known_set:
+        known_block_lines.extend(f"- {fn}" for fn in known_set)
+    else:
+        known_block_lines.append("(empty)")
+    known_block = "\n".join(known_block_lines) + "\n\n"
+
     if chunk is None:
-        chunk_block = (
-            "Assigned candidates: every function name in the slice's"
-            " ``candidate_functions`` array (no chunking — single-call mode).\n\n"
+        focus_block = (
+            "Substrate-projection focus: full slice (no chunking — "
+            "single-call mode).\n\n"
         )
     else:
         formatted = "\n".join(f"- {fn}" for fn in chunk)
-        chunk_block = (
-            f"Assigned candidates ({len(chunk)} function names — emit one"
-            " row each per Part A; also emit additional rows for any"
-            " cross-chunk discoveries per Part B):\n"
+        focus_block = (
+            f"Substrate-projection focus ({len(chunk)} candidate names —"
+            " these are the candidates around which the substrate slice"
+            " was projected; they are already in the known list, you"
+            " do NOT need to enumerate them):\n"
             f"{formatted}\n\n"
         )
     user = (
         "Substrate slice (Step 1 deterministic extractor output, restricted"
         " to candidate-relevant rows):\n\n"
         f"```json\n{slice_.to_json(indent=2)}\n```\n\n"
-        + chunk_block
+        + known_block
+        + focus_block
         + "Output JSON only.\n\n"
         + _MINER_OUTPUT_SHAPE
     )

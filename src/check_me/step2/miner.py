@@ -1,22 +1,29 @@
-"""Miner — propose entrypoint candidates from a substrate slice.
+"""Miner — discover entrypoint candidates the substrate cuts missed.
 
-Architecture (PLAN §0 / Step 2 lossless):
+Architecture (post per-candidate-redundancy removal):
 
-The miner emits one row per function in the slice's
-``candidate_functions`` plus any additional rows it discovers from
-cross-chunk substrate patterns (most importantly the indexed-dispatch
-shape — see ``prompts._MINER_SYSTEM`` Part B). Selection is the
-verifier's job; the miner's job is to make sure every candidate
-gets the verifier's eyes. False negatives at the miner stage are
-unrecoverable — the verifier never sees what the miner didn't
-propose.
+The deterministic substrate cuts (anchors + 1-hop closure +
+call-graph roots — see ``substrate_slice.slice_substrate``) already
+produce a candidate pool the runner forwards directly to the
+verifier as deterministic synthetic rows. The miner therefore
+does NOT re-enumerate substrate-origin candidates — that work is
+pure redundancy because the verifier is anchoring-blind (PLAN §0
+/ Rule 2b) and ignores miner-side reasoning. Instead the miner
+focuses on cross-substrate DISCOVERY of entrypoints the cuts
+missed: indexed dispatchers, runtime callback installations not
+captured by the AST extractor, etc. The miner emits ONLY new
+candidates (function names not in the known pool); empty output
+is the common and correct case.
 
-Implementation: chunk the candidate list into fixed-size groups,
-issue one fresh LLM call per chunk in parallel (each chunk sees the
-full substrate slice as context but only its own assigned subset
-to enumerate), then merge the per-chunk candidate lists deduping by
-``(function, file)``. Renumber ids globally as ``EP-001``, ``EP-002``,
-… so the output is consistent regardless of chunk boundary.
+Implementation: chunk the candidate list to bound per-call
+substrate-projection size on large projects, issue one fresh LLM
+call per chunk in parallel (each chunk sees a chunk-projected
+substrate slice plus the FULL known-candidates list — the
+discovery scope is global, the projection is local for token
+budget), then merge new discoveries across chunks deduping by
+``(function, file)``. Final dedup against known_candidates
+filters out any function name the LLM emitted despite the
+explicit instruction. Renumber ids globally as ``EP-001`` …
 """
 
 from __future__ import annotations
@@ -110,17 +117,23 @@ def mine(
     reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_MINER_TEMPERATURE,
     chunk: list[str] | None = None,
+    known_candidates: list[str] | None = None,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> CallResult:
-    """Run a single miner LLM call.
+    """Run a single miner LLM call (discovery only).
 
     For production, use :func:`mine_chunked`, which calls this in
     parallel across chunks. ``mine`` is exposed for tests and for
     one-shot mining when the candidate count is small.
 
-    ``chunk``: assigned-candidates list for this call. If None, the
-    miner is told to enumerate every function in ``candidate_functions``
-    (single-call mode — used by tests and by very small projects).
+    ``chunk``: substrate-projection focus list. If None, the miner
+    sees the full slice (single-call mode — used by tests and by
+    very small projects).
+
+    ``known_candidates``: project-wide list of function names
+    already in the deterministic synthetic pool. The miner is
+    forbidden from re-emitting these. When None, the slice's own
+    ``candidate_functions`` is used as the known set.
 
     ``temperature``: overrides ``config.temperature`` if not None.
     The miner default is 0.1 — see :data:`DEFAULT_MINER_TEMPERATURE`.
@@ -132,7 +145,9 @@ def mine(
         config = replace(config, temperature=temperature)
     if config.max_tokens < min_max_tokens:
         config = replace(config, max_tokens=min_max_tokens)
-    system, user = build_miner_messages(slice_, chunk=chunk)
+    system, user = build_miner_messages(
+        slice_, chunk=chunk, known_candidates=known_candidates,
+    )
     extra = reasoning_extra(reasoning_effort)
     return chat_json(
         client=client,
@@ -163,20 +178,23 @@ def mine_chunked(
     chunk_hop_depth: int = 1,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> ChunkedMineResult:
-    """Run the miner over fixed-size chunks of the candidate list,
-    in parallel, and merge results.
+    """Run the discovery miner over fixed-size chunks of the
+    candidate list, in parallel, and merge results.
 
-    Per the lossless Step 2 architecture, every function in
-    ``slice_.candidate_functions`` is sent to some chunk's miner
-    call (Part A); each chunk also gets a discovery instruction
-    (Part B). The merged candidate list dedupes by
-    ``(function, file)`` and renumbers ids globally.
+    The candidate list is the project-wide deterministic pool
+    (anchors + 1-hop closure + roots from substrate cuts). Each
+    chunk's slice projects substrate around its assigned subset
+    so the per-call substrate prompt stays bounded. Each chunk
+    also receives the FULL pool as ``known_candidates`` — the
+    miner is told to discover NEW entrypoints and never re-emit
+    a known one. Final dedup against the known set filters out
+    any LLM slip-ups.
 
     ``chunk_hop_depth`` defaults to 1 — see
     :func:`slice_for_candidate_chunk` for the rationale. The miner
-    proposes from direct 1-hop neighbourhood evidence; deeper chain
-    validation is the verifier's job (per-candidate hop=2 + source
-    excerpts).
+    looks at direct 1-hop neighbourhood evidence; deeper chain
+    validation is the verifier's job (per-candidate hop=1 source
+    excerpts on the verifier side).
 
     Determinism: the candidate list is sorted before chunking, so
     chunk membership is reproducible. Within a chunk, the LLM's
@@ -185,6 +203,7 @@ def mine_chunked(
     for stable serialisation.
     """
     candidates = sorted(slice_.candidate_functions)
+    known_candidates = list(candidates)  # full project pool, not chunk
     if not candidates:
         chunks: list[list[str]] = []
     else:
@@ -233,6 +252,7 @@ def mine_chunked(
                 config=config,
                 slice_=chunk_slice,
                 chunk=chunk,
+                known_candidates=known_candidates,
                 max_retries=max_retries,
                 max_tokens_ceiling=max_tokens_ceiling,
                 min_max_tokens=min_max_tokens,
@@ -275,8 +295,12 @@ def mine_chunked(
                 if err is not None:
                     chunk_errors[idx] = err
 
-    # Merge and dedupe by (function, file). Failed chunks contribute
-    # zero candidates but their failure is recorded in per_chunk_diag.
+    # Merge across chunks, dedupe by (function, file), AND filter
+    # out any candidate whose function name is in the known pool —
+    # the LLM is instructed not to re-emit known names but final
+    # filter ensures correctness. Failed chunks contribute zero
+    # candidates but their failure is recorded in per_chunk_diag.
+    known_set = set(known_candidates)
     merged: list[dict[str, Any]] = []
     seen: set[tuple[str | None, str | None]] = set()
     per_chunk_diag: list[dict[str, Any]] = []
@@ -294,8 +318,15 @@ def mine_chunked(
             continue
         proposed = r.parsed.get("candidates", []) if r.parsed else []
         chunk_keep = 0
+        chunk_dropped_known = 0
         for cand in proposed:
-            key = (cand.get("function"), cand.get("file"))
+            fn = cand.get("function")
+            # Strip out any function the LLM emitted despite the
+            # explicit "do NOT emit known" instruction.
+            if isinstance(fn, str) and fn in known_set:
+                chunk_dropped_known += 1
+                continue
+            key = (fn, cand.get("file"))
             if key in seen:
                 continue
             seen.add(key)
@@ -305,15 +336,16 @@ def mine_chunked(
             "chunk_index": i,
             "chunk_size": len(chunks[i]),
             "proposed": len(proposed),
+            "dropped_already_known": chunk_dropped_known,
             "kept_after_dedupe": chunk_keep,
             "ok": True,
             "attempts": r.attempts,
         })
 
-    # Stable sort for determinism, then renumber ids EP-001, EP-002, …
+    # Stable sort for determinism. ID assignment is deferred to the
+    # runner — it merges synthetic + miner output before
+    # renumbering globally.
     merged.sort(key=lambda c: (c.get("file") or "", c.get("function") or ""))
-    for i, cand in enumerate(merged, 1):
-        cand["id"] = f"EP-{i:03d}"
 
     return ChunkedMineResult(
         parsed={"candidates": merged},

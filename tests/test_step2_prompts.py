@@ -58,39 +58,62 @@ def test_miner_schema_enumerates_trigger_types():
 
 
 def test_miner_user_message_includes_chunk_block_when_provided():
-    """Chunked execution: each call gets an explicit assigned-
-    candidates list. Per Part A of the system prompt the miner
-    must emit one row per name in the chunk."""
+    """Chunked execution: each call gets an explicit substrate-
+    projection focus list (the chunk's assigned subset)."""
     sys, user = build_miner_messages(_slice(), chunk=["foo", "bar", "baz"])
-    assert "Assigned candidates" in user
+    assert "Substrate-projection focus" in user
     assert "- foo" in user
     assert "- bar" in user
     assert "- baz" in user
 
 
-def test_miner_user_message_no_chunk_falls_back_to_full_set_instruction():
-    """Backwards-compat: when no chunk is supplied (small projects
-    / unit tests), the user message tells the miner to enumerate
-    every candidate_function in the slice."""
+def test_miner_user_message_no_chunk_falls_back_to_single_call_mode():
+    """When no chunk is supplied (small projects / unit tests),
+    the user message indicates single-call mode."""
     _, user = build_miner_messages(_slice())
     assert "no chunking" in user.lower() or "single-call" in user.lower()
 
 
-def test_miner_system_forbids_skipping_assigned_candidates():
-    """Part A guarantee: every assigned candidate gets a row, even
-    if the miner doubts the entrypoint claim. Selection is the
-    verifier's job."""
+def test_miner_user_message_includes_known_candidates_block():
+    """The miner is given the project-wide known list and told
+    not to re-emit any of them. This is the per-candidate-
+    redundancy removal: the deterministic substrate cuts already
+    produce these as synthetic rows for the verifier."""
+    sys, user = build_miner_messages(
+        _slice(),
+        known_candidates=["alpha", "beta", "gamma"],
+    )
+    assert "Known candidates" in user
+    assert "- alpha" in user
+    assert "- beta" in user
+    assert "- gamma" in user
+
+
+def test_miner_user_message_known_candidates_defaults_to_slice_pool():
+    """If no explicit known list is provided, the slice's
+    candidate_functions is used. The slice fixture contains
+    ``f``, so it must appear in the rendered known-candidates
+    block."""
+    _, user = build_miner_messages(_slice())
+    assert "Known candidates" in user
+    assert "- f" in user
+
+
+def test_miner_system_forbids_emitting_known_candidates():
+    """Discovery-only contract: the miner must not re-emit any
+    function that's already in the known-candidates list. This
+    is what makes the per-candidate redundancy removal sound:
+    deterministic synthetic rows feed the verifier directly."""
     sys, _ = build_miner_messages(_slice())
     text = sys.lower()
-    # The prompt should explicitly call out that skipping is not
-    # permitted and the verifier handles weak claims.
-    assert "skipping is not permitted" in text or "skipping is not\n  permitted" in text
+    assert "do not emit" in text and "known" in text
 
 
-def test_miner_system_includes_part_b_discovery_instruction():
-    """Part B guarantee: every chunk's call gets the discovery
-    instruction so cross-chunk indexed-dispatch patterns are not
-    dropped by chunking."""
+def test_miner_system_includes_discovery_instruction():
+    """The miner's value is finding entrypoints the substrate
+    cuts missed — most importantly indexed-dispatch
+    dispatchers. The system prompt has to describe the
+    pattern so the LLM knows what to look for."""
     sys, _ = build_miner_messages(_slice())
     text = sys.lower()
     assert "indexed-dispatch" in text or "indexed dispatch" in text

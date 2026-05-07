@@ -391,6 +391,205 @@ def _load(substrate: dict | str | Path) -> dict[str, Any]:
     return json.loads(substrate)
 
 
+def _function_def_file_map(cats: dict[str, Any]) -> dict[str, str]:
+    """Map ``function name -> definition file`` from substrate
+    categories whose ``file`` field pins the function's body.
+    Mirrors :func:`step3.retrieval._build_function_def_file_map`.
+
+    Walks every category whose row's ``file`` field records the
+    function's body location:
+
+      - ``call_graph[caller=X]``: the call site is in X's body.
+      - ``data_control_flow[function=X]``, ``guards[function=X]``,
+        ``trust_boundaries[function=X]``,
+        ``callback_registrations[function=X]``: row.file is X's
+        body file.
+
+    NOT used: ``call_graph[callee=X]`` (its file is the call
+    site, not the callee's body) and
+    ``callback_registrations[callback_function=X]`` (its file is
+    the registration site).
+
+    When several files are seen for one name (cross-TU same-name
+    statics), the most-frequent file wins; ties broken by sorted
+    file order so the resolution is deterministic.
+    """
+    from collections import Counter
+
+    counts: dict[str, Counter[str]] = {}
+
+    def _bump(fn: object, file: object) -> None:
+        if not isinstance(fn, str) or not isinstance(file, str):
+            return
+        if fn not in counts:
+            counts[fn] = Counter()
+        counts[fn][file] += 1
+
+    for r in cats.get("call_graph", []):
+        _bump(r.get("caller"), r.get("file"))
+    for cat in (
+        "data_control_flow", "guards",
+        "trust_boundaries", "callback_registrations",
+    ):
+        for r in cats.get(cat, []):
+            _bump(r.get("function"), r.get("file"))
+
+    out: dict[str, str] = {}
+    for fn, c in counts.items():
+        ranked = sorted(c.items(), key=lambda p: (-p[1], p[0]))
+        out[fn] = ranked[0][0]
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Synthetic candidates (deterministic, bypass miner)
+# --------------------------------------------------------------------------- #
+
+
+def synthetic_candidates_from_substrate(
+    substrate: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build deterministic candidate dicts for the verifier from
+    substrate-origin candidates (anchors + 1-hop closure +
+    call-graph roots). These bypass the LLM miner — its
+    per-candidate enumeration was pure redundancy because the
+    verifier is anchoring-blind (PLAN §0 / Rule 2b) and ignores
+    any miner-side reasoning. The miner now runs only for
+    cross-substrate DISCOVERY of entrypoints the cuts missed.
+
+    Returned dicts carry the structural fields the verifier
+    consumes:
+
+      - ``function``, ``file``, ``line`` (file resolved via the
+        function-def-file map; line populated from the source
+        substrate row when available, ``None`` otherwise);
+      - ``trigger_type`` (mapped deterministically from the
+        substrate row's category / kind);
+      - ``trigger_ref`` (a short citation of the originating
+        substrate row);
+      - ``supporting_substrate_edges`` (a single citation
+        identical to ``trigger_ref``);
+      - ``id`` is NOT assigned — the runner re-numbers globally
+        after merging with miner-discovered candidates.
+
+    Determinism: the function set is the same one
+    :func:`slice_substrate` produces; ordering is by
+    ``(file, function)`` for stable serialisation. Only one row
+    per function (the first row that matches in cut order
+    1a → 1b-handler → 1b-site → 1c → 1d wins) so the verifier
+    isn't asked to verify the same function twice.
+
+    Project-agnostic — the dict construction reads only schema-
+    defined fields and pure call-graph topology.
+    """
+    cats = substrate.get("categories", {}) or {}
+    body_file_map = _function_def_file_map(cats)
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _add(
+        fn: object,
+        file: object,
+        line: object,
+        trigger_type: str,
+        trigger_ref: str,
+    ) -> None:
+        if not isinstance(fn, str) or not fn or fn in seen:
+            return
+        seen.add(fn)
+        # Resolve body file when the source row's `file` is the
+        # registration site rather than the body (callback handler
+        # case), or when no file was supplied (closure / root).
+        if not isinstance(file, str) or not file:
+            file = body_file_map.get(fn, "")
+        out.append({
+            "function": fn,
+            "file": file,
+            "line": line if isinstance(line, int) else None,
+            "trigger_type": trigger_type,
+            "trigger_ref": trigger_ref,
+            "supporting_substrate_edges": [trigger_ref],
+        })
+
+    # 1a. trust_boundaries — explicit attacker-input markers.
+    for r in cats.get("trust_boundaries", []):
+        fn = r.get("function")
+        kind = r.get("kind", "unknown")
+        # network_socket -> event; everything else stays unknown so
+        # the verifier's source-aware critique drives the verdict.
+        ttype = "event" if kind == "network_socket" else "unknown"
+        _add(
+            fn, r.get("file"), r.get("line"),
+            ttype,
+            f"trust_boundaries[function={fn}, kind={kind}]",
+        )
+
+    # 1b. callback_registrations — both the handler (callback_function)
+    #     and the registration-site function. row.file pins the
+    #     registration site, NOT the handler's body, so we resolve
+    #     the handler's file via body_file_map.
+    for r in cats.get("callback_registrations", []):
+        kind = r.get("kind", "unknown")
+        cbf = r.get("callback_function")
+        if isinstance(cbf, str) and cbf:
+            _add(
+                cbf, body_file_map.get(cbf), None,
+                "callback",
+                f"callback_registrations[callback_function={cbf}, kind={kind}]",
+            )
+        regfn = r.get("function")
+        if isinstance(regfn, str) and regfn:
+            _add(
+                regfn, r.get("file"), r.get("line"),
+                "unknown",  # registration sites are not the entry slot
+                f"callback_registrations[function={regfn}, kind={kind}]",
+            )
+
+    # 1c + 1d. anchor 1-hop closure + call-graph roots.
+    anchor: set[str] = set()
+    for r in cats.get("trust_boundaries", []):
+        fn = r.get("function")
+        if isinstance(fn, str) and fn:
+            anchor.add(fn)
+    for r in cats.get("callback_registrations", []):
+        for f in (r.get("callback_function"), r.get("function")):
+            if isinstance(f, str) and f:
+                anchor.add(f)
+
+    closure_callees: set[str] = set()
+    for r in cats.get("call_graph", []):
+        if r.get("caller") in anchor and isinstance(r.get("callee"), str):
+            closure_callees.add(r["callee"])
+
+    callers_set: set[str] = set()
+    callees_set: set[str] = set()
+    for r in cats.get("call_graph", []):
+        c = r.get("caller")
+        ce = r.get("callee")
+        if isinstance(c, str) and c:
+            callers_set.add(c)
+        if isinstance(ce, str) and ce:
+            callees_set.add(ce)
+    roots = callers_set - callees_set
+
+    for fn in sorted(closure_callees - anchor):
+        _add(
+            fn, None, None,
+            "unknown",
+            "call_graph[anchor 1-hop callee of trust_boundary or callback handler]",
+        )
+    for fn in sorted(roots - anchor - closure_callees):
+        _add(
+            fn, None, None,
+            "unknown",
+            "call_graph[root: caller-but-never-callee]",
+        )
+
+    out.sort(key=lambda c: (c.get("file") or "", c.get("function") or ""))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Per-candidate focusing
 # --------------------------------------------------------------------------- #

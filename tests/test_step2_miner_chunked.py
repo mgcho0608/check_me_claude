@@ -102,38 +102,49 @@ def _row(fn: str, file: str | None = None, **kw) -> dict[str, Any]:
 
 
 def test_chunked_miner_partitions_candidates_into_fixed_size_chunks():
+    """Chunking still happens — it bounds the substrate-projection
+    size per call. The miner's task is discovery (not enumeration),
+    so the LLM emits new function names, NOT the chunk's
+    candidates which are in the known list."""
     s = _slice_with_candidates(["a", "b", "c", "d", "e"])
-    seen_chunks: list[list[str]] = []
+    seen_focus_lists: list[list[str]] = []
 
     def fake_chat(client, config, request: ChatRequest) -> ChatResponse:
-        # Extract the chunk's candidate list from the user message.
         user = request.messages[-1]["content"]
-        chunk = [
-            line[2:].strip() for line in user.splitlines()
-            if line.startswith("- ")
-        ]
-        seen_chunks.append(chunk)
-        return _resp(_miner_resp([_row(chunk[0])]))
+        # Extract the substrate-projection focus block (the chunk).
+        # Lines after the "Substrate-projection focus" header.
+        focus = []
+        in_focus = False
+        for line in user.splitlines():
+            if line.startswith("Substrate-projection focus"):
+                in_focus = True
+                continue
+            if in_focus:
+                if line.startswith("- "):
+                    focus.append(line[2:].strip())
+                elif line.strip() == "":
+                    break
+        seen_focus_lists.append(focus)
+        # The miner discovers a NEW name, NOT the chunk's known names.
+        first = focus[0] if focus else "?"
+        return _resp(_miner_resp([_row(f"discover_{first}")]))
 
     miner_mod.mine_chunked(
         client="dummy", config=_cfg(), slice_=s,
         chunk_size=2, max_workers=1, chat_fn=fake_chat,
     )
 
-    # Candidates are sorted before chunking ('a','b','c','d','e').
-    assert seen_chunks == [["a", "b"], ["c", "d"], ["e"]], seen_chunks
+    assert seen_focus_lists == [["a", "b"], ["c", "d"], ["e"]], seen_focus_lists
 
 
 def test_chunked_miner_dedupes_by_function_and_file():
-    """If two chunks both propose the same (function, file)
-    (e.g. via Part B discovery on overlapping patterns), keep one."""
+    """If two chunks both discover the same (function, file)
+    via overlapping indexed-dispatch patterns, keep one."""
     s = _slice_with_candidates(["a", "b"])
 
     def fake_chat(client, config, request: ChatRequest) -> ChatResponse:
-        user = request.messages[-1]["content"]
-        first = next(line[2:].strip() for line in user.splitlines() if line.startswith("- "))
-        # Both chunks "discover" the same X.
-        return _resp(_miner_resp([_row(first), _row("X", file="x.c")]))
+        # Every chunk "discovers" the same new X.
+        return _resp(_miner_resp([_row("X", file="x.c")]))
 
     result = miner_mod.mine_chunked(
         client="dummy", config=_cfg(), slice_=s,
@@ -141,35 +152,74 @@ def test_chunked_miner_dedupes_by_function_and_file():
     )
 
     funcs = [c["function"] for c in result.parsed["candidates"]]
+    # Two chunks each emitted X — dedup by (function, file) -> 1 row.
     assert funcs.count("X") == 1, funcs
-    assert "a" in funcs and "b" in funcs
 
 
-def test_chunked_miner_assigns_global_sequential_ids():
+def test_chunked_miner_filters_known_candidates_from_llm_output():
+    """The discovery contract: any function whose name is in
+    known_candidates is dropped at merge time, even if the LLM
+    emits it. The deterministic synthetic pool feeds those to
+    the verifier separately; re-emission in miner output is wasted
+    work."""
+    s = _slice_with_candidates(["a", "b"])
+
+    def fake_chat(client, config, request: ChatRequest) -> ChatResponse:
+        # Misbehaving LLM: emits both a known function ("a") and a
+        # new discovery ("zeta"). Merge must drop "a".
+        return _resp(_miner_resp([_row("a"), _row("zeta")]))
+
+    result = miner_mod.mine_chunked(
+        client="dummy", config=_cfg(), slice_=s,
+        chunk_size=2, max_workers=1, chat_fn=fake_chat,
+    )
+
+    funcs = [c["function"] for c in result.parsed["candidates"]]
+    assert "a" not in funcs, funcs
+    assert "zeta" in funcs, funcs
+
+
+def test_chunked_miner_does_NOT_assign_global_ids():
+    """ID assignment is deferred to the runner so it can merge
+    synthetic + discovered before numbering globally. The miner
+    output keeps whatever id the LLM emitted (or the runner-side
+    later assigns)."""
     s = _slice_with_candidates(["a", "b", "c"])
 
     def fake_chat(client, config, request: ChatRequest) -> ChatResponse:
-        user = request.messages[-1]["content"]
-        first = next(line[2:].strip() for line in user.splitlines() if line.startswith("- "))
-        return _resp(_miner_resp([_row(first)]))
+        return _resp(_miner_resp([_row("discover_zeta", file="z.c")]))
 
     result = miner_mod.mine_chunked(
         client="dummy", config=_cfg(), slice_=s,
         chunk_size=1, max_workers=1, chat_fn=fake_chat,
     )
 
-    ids = [c["id"] for c in result.parsed["candidates"]]
-    # IDs run EP-001..EP-NNN regardless of which chunk emitted them.
-    assert ids == ["EP-001", "EP-002", "EP-003"], ids
+    # Result candidates exist but ids are NOT runner-style.
+    # _row sets id="EP-tmp", which the runner overrides.
+    cands = result.parsed["candidates"]
+    assert len(cands) >= 1
+    assert all(c.get("id") == "EP-tmp" for c in cands)
 
 
 def test_chunked_miner_per_chunk_diagnostic_recorded():
     s = _slice_with_candidates(["a", "b", "c"])
 
     def fake_chat(client, config, request: ChatRequest) -> ChatResponse:
+        # Each chunk emits one new discovery whose name encodes
+        # the chunk's substrate-projection focus list (so each
+        # chunk's discovery is unique and not deduped at merge).
         user = request.messages[-1]["content"]
-        first = next(line[2:].strip() for line in user.splitlines() if line.startswith("- "))
-        return _resp(_miner_resp([_row(first)]))
+        focus_first = None
+        in_focus = False
+        for line in user.splitlines():
+            if line.startswith("Substrate-projection focus"):
+                in_focus = True
+                continue
+            if in_focus and line.startswith("- "):
+                focus_first = line[2:].strip()
+                break
+        return _resp(_miner_resp([_row(f"new_{focus_first}",
+                                       file=f"new_{focus_first}.c")]))
 
     result = miner_mod.mine_chunked(
         client="dummy", config=_cfg(), slice_=s,
@@ -220,19 +270,28 @@ def test_chunked_miner_empty_candidates_returns_empty_list():
 def test_chunked_miner_failed_chunk_does_not_abort_run():
     """A single chunk's exception (e.g. exhausted 429 retry budget)
     must NOT propagate through ``mine_chunked`` and abort the run.
-    Surviving chunks contribute their candidates; the failed chunk
-    is recorded in ``per_chunk`` with ``ok=False`` so the operator
-    can re-run."""
+    Surviving chunks contribute their discoveries; the failed
+    chunk is recorded in ``per_chunk`` with ``ok=False`` so the
+    operator can re-run."""
     s = _slice_with_candidates(["a", "b", "c", "d"])
 
     def flaky_chat(client, config, request: ChatRequest) -> ChatResponse:
         user = request.messages[-1]["content"]
-        first = next(line[2:].strip() for line in user.splitlines() if line.startswith("- "))
-        # Fail on chunk starting with "c" (the third chunk under
-        # chunk_size=1); succeed on others.
-        if first == "c":
+        # Find the first focus-block "- name" line.
+        focus_first = None
+        in_focus = False
+        for line in user.splitlines():
+            if line.startswith("Substrate-projection focus"):
+                in_focus = True
+                continue
+            if in_focus and line.startswith("- "):
+                focus_first = line[2:].strip()
+                break
+        # Fail on chunk starting with "c"; succeed on others.
+        if focus_first == "c":
             raise RuntimeError("simulated 429 retry budget exhausted")
-        return _resp(_miner_resp([_row(first)]))
+        return _resp(_miner_resp([_row(f"new_{focus_first}",
+                                       file=f"new_{focus_first}.c")]))
 
     result = miner_mod.mine_chunked(
         client="dummy", config=_cfg(), slice_=s,
@@ -240,23 +299,33 @@ def test_chunked_miner_failed_chunk_does_not_abort_run():
     )
 
     funcs = sorted(c["function"] for c in result.parsed["candidates"])
-    # 'c' fails — the other three survive.
-    assert funcs == ["a", "b", "d"], funcs
+    # 'c' chunk fails — discoveries from a, b, d chunks survive.
+    assert funcs == ["new_a", "new_b", "new_d"], funcs
     failed = [d for d in result.per_chunk if not d.get("ok", True)]
     assert len(failed) == 1
     assert "simulated" in failed[0]["error"]
 
 
-def test_chunked_miner_parallel_path_preserves_id_order_by_file():
+def test_chunked_miner_parallel_path_preserves_file_order():
     """With max_workers > 1 chunks finish in non-deterministic
     order, but the merged candidate list is sorted by (file,
-    function) and ids assigned globally — output is stable."""
+    function) for stable serialisation."""
     s = _slice_with_candidates(["alpha", "beta", "gamma", "delta"])
 
     def fake_chat(client, config, request: ChatRequest) -> ChatResponse:
         user = request.messages[-1]["content"]
-        first = next(line[2:].strip() for line in user.splitlines() if line.startswith("- "))
-        return _resp(_miner_resp([_row(first)]))
+        focus_first = None
+        in_focus = False
+        for line in user.splitlines():
+            if line.startswith("Substrate-projection focus"):
+                in_focus = True
+                continue
+            if in_focus and line.startswith("- "):
+                focus_first = line[2:].strip()
+                break
+        # Discover one new candidate per chunk.
+        return _resp(_miner_resp([_row(f"new_{focus_first}",
+                                       file=f"new_{focus_first}.c")]))
 
     result = miner_mod.mine_chunked(
         client="dummy", config=_cfg(), slice_=s,
@@ -265,5 +334,3 @@ def test_chunked_miner_parallel_path_preserves_id_order_by_file():
 
     files = [c["file"] for c in result.parsed["candidates"]]
     assert files == sorted(files)
-    ids = [c["id"] for c in result.parsed["candidates"]]
-    assert ids == [f"EP-{i:03d}" for i in range(1, len(ids) + 1)]
