@@ -2,7 +2,8 @@
 
 The candidate pool is the set of functions where attacker-
 controlled bytes can plausibly enter, anchored at Step 1's two
-principled attacker-input markers:
+principled attacker-input markers, plus a narrow structural
+backstop:
 
  1. ``trust_boundaries[].function`` — Step 1's explicit attacker-
     input markers (network sockets, IPC endpoints, file reads,
@@ -18,21 +19,27 @@ principled attacker-input markers:
     into it. Generic shape of any layered protocol stack:
     ``recv_callback -> process_request`` or
     ``socket_handler -> dispatch_message``.
+ 4. ``call_graph`` roots — functions appearing as caller but never
+    as callee. PLAN §6 Rule 2 ("downstream tolerates substrate
+    imperfections") backstop. Step 1's struct_initializer detector
+    is libclang-AST-based and silently misses cases where the
+    enclosing translation unit fails to fully type-check (project
+    headers absent, vendor macros undefined). When the missed
+    initializer was the registration site of the project's
+    primary plugin entry, the entry function ends up as a root
+    (its body is parsed but no caller edge points at it). Adding
+    roots recovers such entries at the cost of admitting some
+    orphan helpers whose true callers were not extracted. The
+    cost is project-agnostic and bounded by the call-graph
+    topology — no project-name or symbol-pattern logic.
 
 Earlier revisions also added cross-TU callees (every function
-defined in one .c and called from another) and call_graph roots
-(caller-but-never-callee) as speculative cuts. Those were dropped
-because they mixed two semantically different things — high-
-precision attacker-input markers and structural over-collection
-— and pushed 75%+ of the filtering work onto the LLM verifier
-without recovering primary entrypoints unreachable from anchors.
-PLAN §6 Rule 2 ("downstream tolerates substrate imperfections")
-is satisfied by the verifier's hop-2 source-aware critique on the
-remaining pool, NOT by widening the pool with structurally
-indiscriminate cuts. When Step 1's boundary detection is
-imperfect, the right fix is to strengthen Step 1's
-trust_boundary extractor, not to paper over with Step 2 fall-back
-cuts.
+defined in one .c and called from another) as a fifth cut. That
+cut was dropped because most cross-TU callees are internal helper
+functions, not entrypoints; it added ~75% structural noise that
+the LLM verifier paid for in latency without recovering primary
+entrypoints. Roots (cut 4) admit a much smaller backstop — caller-
+only is a narrower property than cross-TU-called.
 
 This split is principled and project-agnostic: every cut roots in
 a schema-defined category or pure call-graph topology; no project
@@ -274,6 +281,30 @@ def slice_substrate(
         callee = r.get("callee")
         if isinstance(caller, str) and caller in anchor_set and isinstance(callee, str) and callee:
             candidate_funcs.add(callee)
+
+    # 1d. call_graph roots — functions appearing as caller but
+    #     never as callee. PLAN §6 Rule 2 backstop for
+    #     Step 1 imperfections. The struct_initializer detector
+    #     (Mechanism 5 in step1/callback_registrations.py) is
+    #     libclang-AST-based and silently drops cases where the
+    #     translation unit fails to fully type-check. When the
+    #     missed initializer was the registration site of the
+    #     project's primary plugin entry, the entry function ends
+    #     up as a root (its body parses, but no caller edge points
+    #     at it). Roots are the narrowest call-graph topology
+    #     property that recovers such entries. Project-agnostic;
+    #     not gated by symbol pattern.
+    callers_set: set[str] = set()
+    callees_set: set[str] = set()
+    for r in all_edges:
+        c = r.get("caller")
+        ce = r.get("callee")
+        if isinstance(c, str) and c:
+            callers_set.add(c)
+        if isinstance(ce, str) and ce:
+            callees_set.add(ce)
+    for fn in callers_set - callees_set:
+        candidate_funcs.add(fn)
 
     # 2. Neighborhood: call_graph edges where caller OR callee is a
     #    candidate. Edges are distributed across candidates with a

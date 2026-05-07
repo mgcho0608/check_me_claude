@@ -58,20 +58,19 @@ def test_callback_function_added_to_candidates():
     assert len(s.callback_registrations) == 1
 
 
-def test_cross_tu_callee_NOT_added_unless_anchored():
-    """An anchor-based pool admits a callee only via 1-hop closure
-    over (trust_boundaries ∪ callback_registrations). A cross-TU
-    callee whose caller is itself unanchored is NOT added to the
-    pool — earlier revisions added every cross-TU callee as a
-    speculative cut, but that mixed high-precision attacker-input
-    markers with structural over-collection (most cross-TU callees
-    are internal helpers, not entrypoints). PLAN §6 Rule 2 is
-    satisfied by the verifier's per-candidate hop=2 + source-
-    aware critique, not by widening the pool here."""
+def test_cross_tu_callee_NOT_added_unless_anchored_or_caller_root():
+    """The pool admits a callee only via 1-hop closure over
+    (trust_boundaries ∪ callback_registrations). A cross-TU callee
+    whose caller is itself unanchored is NOT added to the pool —
+    earlier revisions added every cross-TU callee as a speculative
+    cut, but that mixed high-precision attacker-input markers
+    with structural over-collection. The caller, however, is a
+    root (caller-but-never-callee) so it enters via cut 1d (the
+    Rule 2 backstop)."""
     sub = _empty_substrate()
-    # Caller in api.c (no trust/callback row) calls helper(). Both
-    # are project-internal symbols with no anchor, so neither
-    # enters the pool.
+    # Caller in api.c (no trust/callback row) calls helper(). The
+    # callee has no anchor connection so it stays out; the caller
+    # is a root (no incoming edge) so it enters via cut 1d.
     sub["categories"]["call_graph"] = [
         {"caller": "api_call", "callee": "helper",
          "file": "api.c", "line": 10, "kind": "direct"},
@@ -82,14 +81,16 @@ def test_cross_tu_callee_NOT_added_unless_anchored():
     ]
     s = slice_substrate(sub)
     assert "helper" not in s.candidate_functions
-    assert "api_call" not in s.candidate_functions
+    # api_call is a root.
+    assert "api_call" in s.candidate_functions
 
 
 def test_intra_tu_callee_NOT_added_to_candidates():
     """A function called only from within its own definition file
-    is a local helper, not an entrypoint. Neither caller nor
-    callee enter the pool unless they're anchored (trust /
-    callback) or 1-hop downstream of an anchor."""
+    is a local helper, not an entrypoint. The callee has no anchor
+    connection and is not a root (it has an incoming edge), so it
+    stays out of the pool. The caller is a root and enters via
+    cut 1d."""
     sub = _empty_substrate()
     sub["categories"]["call_graph"] = [
         {"caller": "outer", "callee": "local_helper",
@@ -100,9 +101,10 @@ def test_intra_tu_callee_NOT_added_to_candidates():
          "guard_line": 5, "result_used": True},
     ]
     s = slice_substrate(sub)
-    # No anchor -> no candidate.
+    # local_helper is a callee with no anchor reach -> not in pool.
     assert "local_helper" not in s.candidate_functions
-    assert "outer" not in s.candidate_functions
+    # outer is caller-but-never-callee -> root -> in pool.
+    assert "outer" in s.candidate_functions
 
 
 def test_callback_handler_callee_added_to_candidates():
@@ -170,15 +172,15 @@ def test_slice_for_candidate_chunk_call_graph_scoped_to_chunk_set_only():
     assert ("helper", "deeper") not in pairs
 
 
-def test_call_graph_root_NOT_added_unless_anchored():
-    """The earlier "every caller-but-never-callee is a candidate"
-    cut was an over-collection workaround for sparse Step 1
-    coverage. The anchor-based pool drops it: a root is admitted
-    only if it is itself an anchor (trust / callback) or a 1-hop
-    callee of one. Reasoning: many "roots" in extracted call
-    graphs are orphans whose callers were not extracted, not real
-    program entry points; treating every root as a candidate
-    pushed structural noise onto the LLM verifier."""
+def test_call_graph_root_added_to_candidates():
+    """Roots (caller-but-never-callee) ARE in the pool — narrow
+    structural backstop for PLAN §6 Rule 2. Step 1's
+    struct_initializer detector silently misses cases where the
+    enclosing translation unit fails to type-check (vendor macros
+    absent, headers missing); the missed initializer's primary
+    plugin entry then appears in the call graph as a root. Roots
+    is the narrowest call-graph topology property that recovers
+    such entries while remaining project-agnostic."""
     sub = _empty_substrate()
     sub["categories"]["call_graph"] = [
         {"caller": "main", "callee": "do_work",
@@ -187,8 +189,15 @@ def test_call_graph_root_NOT_added_unless_anchored():
          "file": "main.c", "line": 12, "kind": "direct"},
     ]
     s = slice_substrate(sub)
-    # No anchor row exists -> nothing in the pool, including main.
-    assert s.candidate_functions == []
+    # main is caller-only -> root, and roots are admitted.
+    assert "main" in s.candidate_functions
+    # do_work appears as callee, so it is NOT a root by this cut;
+    # it would only enter the pool via the anchor closure (1c),
+    # which it is not part of here (no trust / callback anchor).
+    assert "do_work" not in s.candidate_functions
+    # lib_func is a callee, never a caller in the graph -> not a
+    # root; not in pool.
+    assert "lib_func" not in s.candidate_functions
 
 
 def test_trust_boundary_callee_added_to_candidates():
@@ -215,14 +224,13 @@ def test_trust_boundary_callee_added_to_candidates():
     assert "deep_helper" not in s.candidate_functions
 
 
-def test_call_graph_neighborhood_filtered_by_anchor_closure():
+def test_call_graph_neighborhood_filtered_by_pool_membership():
     """Edges where neither endpoint is in the candidate pool are
-    dropped — only edges touching the anchor or its 1-hop closure
-    survive. ``(x, y)`` here has no anchor connection so its row
-    is filtered. ``(entry, helper)`` and ``(z, entry)`` both touch
-    the anchor (``entry`` is a trust_boundary; ``helper`` is a
-    1-hop callee of an anchor — they're both pool members; ``z``
-    is not, but the edge still survives because ``entry`` is)."""
+    dropped. Pool membership comes from anchors (trust / callback),
+    their 1-hop closure, or roots (the cut-1d Rule-2 backstop).
+    Here ``entry`` is the trust anchor; ``helper`` enters via 1-hop
+    closure; ``x`` and ``z`` are roots (caller-only) so their
+    edges survive even though ``y`` is not in the pool itself."""
     sub = _empty_substrate()
     sub["categories"]["trust_boundaries"].append({
         "kind": "network_socket", "function": "entry",
@@ -235,7 +243,8 @@ def test_call_graph_neighborhood_filtered_by_anchor_closure():
     ]
     s = slice_substrate(sub)
     cg_pairs = sorted((e["caller"], e["callee"]) for e in s.call_graph)
-    assert cg_pairs == [("entry", "helper"), ("z", "entry")]
+    # All three edges survive: x and z are roots, entry is anchor.
+    assert cg_pairs == [("entry", "helper"), ("x", "y"), ("z", "entry")]
 
 
 def test_guards_filtered_to_neighborhood():
