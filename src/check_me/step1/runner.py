@@ -39,6 +39,7 @@ from . import (
     callback_registrations,
     config_triggers,
     data_control_flow,
+    dispatch_resolution,
     evidence_anchors,
     guards,
     trust_boundaries,
@@ -54,6 +55,7 @@ class RunReport:
     edges_total: int
     edges_direct: int
     edges_indirect: int
+    edges_dispatch_resolved: int
     dcf_total: int
     dcf_branch: int
     dcf_loop: int
@@ -112,9 +114,17 @@ def run(
                 parsed, project_root
             )
         )
-        all_cb.extend(
-            callback_registrations.extract_callback_regs_from_tu(
-                parsed, project_root
+        tu_cb = callback_registrations.extract_callback_regs_from_tu(
+            parsed, project_root
+        )
+        all_cb.extend(tu_cb)
+        # Dispatch resolution joins the function_table rows above with
+        # indexed-call AST sites in the same TU to recover the
+        # otherwise-opaque indirect dispatch (PLAN §6 Rule 12 — pure
+        # AST-shape match, no symbol-name heuristics).
+        all_edges.extend(
+            dispatch_resolution.extract_dispatch_resolution_edges(
+                parsed, project_root, tu_cb
             )
         )
         all_anchors.extend(
@@ -156,6 +166,11 @@ def run(
         edges_total=len(edges),
         edges_direct=sum(1 for e in edges if e.kind == "direct"),
         edges_indirect=sum(1 for e in edges if e.kind == "indirect"),
+        edges_dispatch_resolved=sum(
+            1
+            for e in edges
+            if e.kind == "indirect" and e.note.startswith("dispatch resolved via ")
+        ),
         dcf_total=len(dcf),
         dcf_branch=sum(1 for d in dcf if d.kind == "branch"),
         dcf_loop=sum(1 for d in dcf if d.kind == "loop"),

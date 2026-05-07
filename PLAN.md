@@ -625,6 +625,8 @@ Heuristics must be principled (rooted in a language standard, an OS standard, or
 
 Generality and intuitiveness are core values. **A lower gold-match across N datasets coming from honest extraction is strictly preferable to a higher gold-match coming from dataset-tuned heuristics.** Any heuristic added to "make dataset X match" without a principled language-level justification is a regression even when the test number goes up. When a generality audit catches such a tuning, it is removed and the metrics report records the (usually small) gold-match impact.
 
+**Self-question for every new pattern / prompt directive.** Before merging, the change author answers in the commit body or PR description: *"Does this pattern/directive remain meaningful if every dataset in our corpus is removed?"* If the answer is no — if the rationale collapses without the corpus — the change is dataset-tuning and must be reframed against a language standard, OS standard, or broadly shared convention, or rejected. Examples that pass: "function-table dispatch is one of the most common indirect-call idioms in C systems code (Linux file_operations, ISR vectors, network handler tables)"; "deep-chain CVEs typically cross function boundaries". Examples that fail: "this matches libssh's `cb->callbacks` shape"; "this prompt directive helps dnsmasq IR-002 reach `add_resource_record`".
+
 ---
 
 ## 7. Explicit Non-Goals
@@ -769,6 +771,21 @@ This appendix tracks the implemented portion of the 4-step pipeline. Updated as 
   (struct_initializer + callback_argument in
   callback_registrations, switch-case in guards, argv-of-main +
   POSIX audit in trust_boundaries).
+- **Dispatch-resolution edges**
+  (`src/check_me/step1/dispatch_resolution.py`). Joins
+  `function_table` rows from `callback_registrations` with
+  indexed-call AST sites (``arr[i](...)`` / ``obj->field[i](...)``)
+  in the same TU, emitting one `kind: "indirect"` `call_graph`
+  edge per (call_site, table_entry) pair with a
+  ``note: "dispatch resolved via <name>[]"``. Pattern A (direct
+  array DeclRefExpr) is exact; Pattern B (struct-field MemberRef)
+  is broad-match across same-TU function tables — a deliberate
+  lossless-propagation choice so the verifier filters per
+  candidate. Project-agnostic by construction (only AST cursor
+  kinds and existing function_table rows; no symbol or naming
+  heuristic). Closes the libssh CVE-2018-10933 P3b gap where
+  ``ssh_packet_process → ssh_packet_userauth_success`` had no
+  resolved edge — diagnosis recorded in the corpus run report.
 - Regex baseline (`src/check_me/step1/regex_baseline.py`) +
   `regex-compare` CLI subcommand for the architectural-decision
   metric.
@@ -828,6 +845,20 @@ Step 3 (`src/check_me/step3/`):
   bounds budget. Default-on; toggle off with
   `--no-escalation`. The signalling field is stripped from
   the persisted IR so the on-disk schema stays clean.
+- **Inter-function-transition incentive** in the synthesis
+  prompt (Part A of `src/check_me/step3/prompts.py`). When the
+  entry function's body contains a tempting in-function sink AND
+  the substrate also exposes inter-function call edges from the
+  entry (direct or dispatch-resolved indirect), the LLM is
+  instructed to prefer walking at least one inter-function edge
+  whose callee body is in the source excerpts before committing
+  to an entry-internal sink. Project-agnostic — phrased on
+  schema enums and substrate provenance (e.g. ``dispatch
+  resolved via <table>[]`` notes), never on specific symbols.
+  Closes the dnsmasq CVE-2017-14491 IR-002 single-function-trap
+  failure mode where ``tcp_request:1700`` was selected as sink
+  instead of walking the deeper ``answer_request →
+  add_resource_record`` chain.
 - Tests: 19 step3 test cases.
 
 Step 4 (`src/check_me/step4/`):

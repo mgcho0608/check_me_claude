@@ -89,6 +89,30 @@ PART A — Path nodes.
   is in your input; staying at the caller's line is conservative
   and loses precision.
 
+  IMPORTANT — inter-function transition before in-function sinks.
+  If the entry function's own body contains a tempting sink-like
+  line (an unchecked write, an unguarded dereference, a state
+  assignment) AND the substrate neighborhood ALSO exposes
+  inter-function call edges leaving the entry function (direct or
+  dispatch-resolved indirect — note ``dispatch resolved via
+  <table>[]`` on indirect call_graph rows means a function-table
+  dispatch was resolved to candidate handlers), prefer to walk at
+  least one such inter-function edge whose callee body is in the
+  source excerpts before committing to an entry-function-internal
+  sink. Real CVE chains usually cross function boundaries; an in-
+  entry sink is valid only when the entry function is itself the
+  bug-bearing frame (e.g. an inline parser that writes past a
+  buffer, or a top-level command handler that flips a privilege
+  bit on its own). When in doubt — when both the entry-internal
+  line AND a callee body could anchor the sink — choose the
+  callee whose body the excerpts show, and emit the entry-
+  internal line as ``intermediate``. This is a chain-depth
+  incentive, not a hard rule: if the inter-function edges
+  available are clearly off-target (logging, unrelated init), an
+  entry-internal sink is still the honest choice. Cite the
+  reasoning in ``uncertainty`` either way so a re-call can
+  recover precision when the substrate added context.
+
   CRITICAL — sink role REQUIRES a real harmful-operation line.
   A node with ``role: "sink"`` MUST have a non-zero, non-null
   ``line`` field that points to the EXACT source line where the
