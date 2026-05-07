@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..audit_log import AuditLog
 from ..llm.client import ChatRequest, ChatResponse, chat, make_client
 from ..llm.config import Config, StepKind, load_config
 from . import synth as synth_mod
@@ -143,6 +144,7 @@ def run(
     synth_max_workers: int = synth_mod.DEFAULT_MAX_WORKERS,
     synth_retry_passes: int = 2,
     synth_retry_cooldown_sec: float = 5.0,
+    audit_log: AuditLog | None = None,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> tuple[dict[str, Any], Step4Report]:
     """Run Step 4 end-to-end on a single dataset's Step 3 output.
@@ -171,6 +173,8 @@ def run(
     for backwards-compat profiling).
     """
     start = time.monotonic()
+    if audit_log is None:
+        audit_log = AuditLog.disabled()
 
     irs_doc = json.loads(Path(evidence_irs_path).read_text())
     project = irs_doc.get("project", "<unknown>")
@@ -209,6 +213,7 @@ def run(
             max_workers=synth_max_workers,
             retry_passes=synth_retry_passes,
             retry_cooldown_sec=synth_retry_cooldown_sec,
+            audit_log=audit_log,
             chat_fn=chat_fn,
         )
     else:
@@ -218,6 +223,7 @@ def run(
             project=project, cve=cve,
             retry_passes=synth_retry_passes,
             retry_cooldown_sec=synth_retry_cooldown_sec,
+            audit_log=audit_log,
             chat_fn=chat_fn,
         )
         chunks_diag = []
@@ -263,11 +269,13 @@ def _run_single(
     cve: str,
     retry_passes: int,
     retry_cooldown_sec: float,
+    audit_log: AuditLog,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Single-call synthesis with the original retry-on-failure
     loop. Used when the sink-bearing IR count fits in one chunk."""
     def _attempt_synthesis() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        t0 = time.monotonic()
         try:
             result = synth_mod.synthesise_scenarios(
                 client=client, config=config,
@@ -276,10 +284,29 @@ def _run_single(
                 chat_fn=chat_fn,
             )
             scenarios = result.parsed.get("attack_scenarios", [])
+            elapsed = time.monotonic() - t0
+            audit_log.append({
+                "stage": "step4.synth",
+                "mode": "single",
+                "ir_count": len(irs),
+                "produced": len(scenarios),
+                "attempts": len(result.attempts),
+                "elapsed_sec": round(elapsed, 2),
+                "ok": True,
+            })
             return scenarios, {"ok": True, "attempts": result.attempts}
         except Exception as exc:  # noqa: BLE001
             err = f"{type(exc).__name__}: {exc}"
+            elapsed = time.monotonic() - t0
             logger.warning("step4: synthesis call failed — %s", err[:200])
+            audit_log.append({
+                "stage": "step4.synth",
+                "mode": "single",
+                "ir_count": len(irs),
+                "elapsed_sec": round(elapsed, 2),
+                "ok": False,
+                "error": err[:300],
+            })
             return [], {"ok": False, "error": err[:300]}
 
     scenarios, info = _attempt_synthesis()
@@ -309,6 +336,7 @@ def _run_chunked(
     max_workers: int,
     retry_passes: int,
     retry_cooldown_sec: float,
+    audit_log: AuditLog,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse],
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
     """Chunked synthesis with per-chunk retry sweep.
@@ -326,6 +354,7 @@ def _run_chunked(
         project=project, cve=cve,
         chunk_size=chunk_size,
         max_workers=max_workers,
+        audit_log=audit_log,
         chat_fn=chat_fn,
     )
     scenarios: list[dict[str, Any]] = list(first.parsed.get("attack_scenarios", []))

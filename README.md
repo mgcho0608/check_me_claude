@@ -43,9 +43,9 @@ Step 4: 선들을 엮어 도형     — 공격 시나리오
 |---|---|---|
 | `step1` | Substrate 추출 (Step 1) | 없음 |
 | `regex-compare` | Clang vs regex 베이스라인 비교 (Stage 0 EC-1) | 없음 |
-| `step2` | Entrypoint mining + verification (Step 2) | miner + verifier |
-| `step3` | Evidence IR 합성 (Step 3) | per-IR synthesis |
-| `step4` | Attack scenario 합성 (Step 4) | single-call scenario synth |
+| `step2` | Entrypoint = 결정론적 synthetic 후보 + discovery miner + verifier | discovery miner + verifier |
+| `step3` | Evidence IR 합성 (Step 3) | per-IR synthesis (N=2 hybrid retrieval) |
+| `step4` | Attack scenario 합성 (Step 4) | chunked scenario synth (single-call when sink-bearing IR ≤ chunk size) |
 | `eval` | Gold vs 산출물 4-step 매칭 + `eval_report.json` (Stage 3) | step3/step4에 LLM judge |
 
 LLM-using subcommand들은 `CHECK_ME_LLM_*` env vars 또는 `.env`에서 provider/key/model을 읽음
@@ -88,27 +88,37 @@ deterministic Step 1 + Step 2 매칭만 빠르게 sanity check 가능.
 
 ## 현재 상태
 
-**4-step 파이프라인 모두 구현·검증 완료** (3 dataset 기준).
-pytest 320+개 모두 통과. 자세한 상태는
+**4-step 파이프라인 모두 구현 + 5개 active 데이터셋에서 정합성 검증.**
+pytest 355개 모두 통과. 자세한 상태는
 [PLAN.md §Appendix A](./PLAN.md#appendix-a-current-pipeline-state) 참고.
 
 | Step | 구현 | 모듈 | LLM | 결정론 / 합성 분업 |
 |---|---|---|---|---|
 | Step 1 | ✅ | `src/check_me/step1/` | 없음 | 100% 결정론 (libclang AST + regex baseline) |
-| Step 2 | ✅ | `src/check_me/step2/` | miner + verifier | chunked miner (lossless propagation), 별개 LLM 인스턴스, anchoring 차단 |
+| Step 2 | ✅ | `src/check_me/step2/` | discovery miner + verifier | (a) substrate cuts (anchor + 1-hop closure + roots) → 결정론적 synthetic 후보. (b) discovery miner는 substrate에 없는 indirect-dispatch 등 새 entrypoint만 발굴. (c) verifier가 source-aware critique. anchoring 차단 (Rule 2b). |
 | Step 3 | ✅ | `src/check_me/step3/` | per-IR synthesis | N=2 hybrid retrieval (call edges + shared global state) — LLM 자유 선택 금지 |
-| Step 4 | ✅ | `src/check_me/step4/` | single-call scenario synth | IR weaving — 시나리오 = exploit_chain + ≥1 sink |
+| Step 4 | ✅ | `src/check_me/step4/` | chunked scenario synth | sink-bearing IR을 fixed-size chunk로 split, 각 chunk 별 LLM 호출, 시나리오 dedup으로 merge. sink-bearing IR ≤ chunk size 일 때만 단일 호출. 시나리오 = exploit_chain + ≥1 sink. |
 
-각 단계는 sequential 호출 + per-call 실패 fallback + 재시도 패스로
-provider rate-limit / transient 장애 안에서 안정 동작.
+각 단계는 parallel 호출 (default 8 workers) + per-call 실패 fallback + 재시도 패스로
+provider rate-limit / transient 장애 안에서 안정 동작. 모든 LLM-using
+단계는 per-call 결과를 `<out_dir>/<step>_audit.jsonl` 로 stream-only
+append — 진행 중에도 `tail -f` 가능, 프로세스 중단 시 완료된 작업
+보존 (자동 resume은 미지원, 정상 종료 시 entrypoints.json /
+evidence_irs.json / attack_scenarios.json은 기존대로 동작).
 
-### 3 dataset 종합 결과 (gold 대비, 2026-05-05 시점)
+### Active datasets
 
-| Dataset | Step 1→4 결과 | 비고 |
+5개 active 데이터셋, 1개 excluded (gold 라벨 없음). 자세한 내용은
+[`datasets/registry.json`](./datasets/registry.json).
+
+| Project | CVE | 상태 |
 |---|---|---|
-| **libssh** CVE-2018-10933 | ✅ Gold AS-001 (auth_bypass / privilege_bypass / high) 정확 회수 | multi-IR weave (IR-028 → IR-026 → IR-039) 작동 |
-| **dnsmasq** CVE-2017-14491 | ✅ Gold AS-001+002 (memory_write / memory_corruption) 정확 회수 (UDP/TCP 둘 다) | retrieval file-attribution + deeper-sink prompt fix 적용 |
-| **contiki-ng** CVE-2021-21281 | ⚠️ Step 3 IR-047이 gold sink (uip_process / state_corruption) 정확 회수, Step 4가 78 IRs 중 15개만 시나리오로 변환해 IR-047 누락 | substrate / IR 차원에서는 보존 (audit 가능). chunked Step 4가 follow-up fix 후보 |
+| **libssh** | CVE-2018-10933 | active (gold 4종 완비) |
+| **dnsmasq** | CVE-2017-14491 | active (gold 4종 완비) |
+| **lwip** | CVE-2020-22283 | active (gold 4종 완비) |
+| **mbedtls** | CVE-2018-0488 | active (gold 4종 완비) |
+| **sudo** | CVE-2021-3156 | active (gold 4종 완비) |
+| _contiki-ng_ | _CVE-2021-21281_ | excluded — source 만, gold 없음 (codebase 규모로 신뢰성 있는 라벨링 곤란) |
 
 자세한 산출물은 [`out/<project>-<cve>/`](./out/) 참조 (substrate.json /
 entrypoints.json / evidence_irs.json / attack_scenarios.json).

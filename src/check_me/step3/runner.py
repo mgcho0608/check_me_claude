@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..audit_log import AuditLog
 from ..llm.client import ChatRequest, ChatResponse, chat, make_client
 from ..llm.config import Config, StepKind, load_config
 from . import synth as synth_mod
@@ -153,6 +154,7 @@ def run(
     synth_retry_cooldown_sec: float = 5.0,
     enable_escalation: bool = True,
     escalation_hop_depth: int = DEFAULT_HOP_DEPTH + 1,
+    audit_log: AuditLog | None = None,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> tuple[dict[str, Any], Step3Report]:
     """Run Step 3 end-to-end on a single dataset's outputs.
@@ -172,6 +174,8 @@ def run(
     from the persisted IR.
     """
     start = time.monotonic()
+    if audit_log is None:
+        audit_log = AuditLog.disabled()
 
     substrate = json.loads(Path(substrate_path).read_text())
     entrypoints_doc = json.loads(Path(entrypoints_path).read_text())
@@ -318,6 +322,23 @@ def run(
                 bool(info.get("escalated")),
                 elapsed,
             )
+            audit_log.append({
+                "stage": "step3.synth",
+                "candidate_id": ep.get("id"),
+                "function": ep.get("function"),
+                "file": ep.get("file"),
+                "ir_id": ir_parsed.get("id"),
+                "neighborhood_nodes": info.get("neighborhood_nodes", 0),
+                "neighborhood_edges": info.get("neighborhood_edges", 0),
+                "excerpts": info.get("excerpts", 0),
+                "sink_count": sink_count,
+                "escalated": bool(info.get("escalated")),
+                "hop_depth": info.get("hop_depth"),
+                "unanchored_sinks_demoted": info.get("unanchored_sinks_demoted") or [],
+                "attempts": info.get("attempts", 0),
+                "elapsed_sec": round(elapsed, 2),
+                "ok": True,
+            })
             return idx, ir_parsed, info
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
             elapsed = time.monotonic() - t0
@@ -328,6 +349,15 @@ def run(
                 _done["n"], _total,
                 ep.get("id"), ep.get("function"), elapsed, err[:120],
             )
+            audit_log.append({
+                "stage": "step3.synth",
+                "candidate_id": ep.get("id"),
+                "function": ep.get("function"),
+                "file": ep.get("file"),
+                "elapsed_sec": round(elapsed, 2),
+                "ok": False,
+                "error": err[:300],
+            })
             return idx, _synthetic_unverified_ir(
                 entrypoint=ep, error_text=err,
             ), {

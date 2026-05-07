@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..audit_log import AuditLog
 from ..llm.client import ChatRequest, ChatResponse, chat, make_client
 from ..llm.config import Config, StepKind, load_config
 from . import miner as miner_mod
@@ -88,6 +89,7 @@ def run(
     verifier_max_workers: int = 8,
     verifier_retry_passes: int = 2,
     verifier_retry_cooldown_sec: float = 5.0,
+    audit_log: AuditLog | None = None,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> tuple[dict[str, Any], RunReport]:
     """Run Step 2 end-to-end (lossless architecture).
@@ -145,6 +147,8 @@ def run(
         ``entrypoints_json`` matches ``schemas/entrypoints.v1.json``.
     """
     start = time.monotonic()
+    if audit_log is None:
+        audit_log = AuditLog.disabled()
     # Materialise the substrate as a dict so source-excerpt retrieval
     # can walk it later without re-reading the file.
     if isinstance(substrate, (str, Path)):
@@ -192,6 +196,7 @@ def run(
         max_workers=miner_max_workers,
         use_chunk_focused_slice=miner_use_chunk_focused_slice,
         chunk_hop_depth=miner_chunk_hop_depth,
+        audit_log=audit_log,
         chat_fn=chat_fn,
     )
     discovered: list[dict[str, Any]] = miner_result.parsed.get("candidates", [])
@@ -313,13 +318,30 @@ def run(
             )
             elapsed = time.monotonic() - t0
             _done["n"] += 1
+            verdict_str = v_result.parsed.get("verdict", "?")
             logger.info(
                 "step2.verifier: %d/%d %s(%s) verdict=%s elapsed=%.1fs attempts=%d",
                 _done["n"], _total,
                 cand.get("id"), cand.get("function"),
-                v_result.parsed.get("verdict", "?"),
+                verdict_str,
                 elapsed, len(v_result.attempts),
             )
+            audit_log.append({
+                "stage": "step2.verifier",
+                "candidate_id": cand.get("id"),
+                "function": cand.get("function"),
+                "file": cand.get("file"),
+                "verdict": verdict_str,
+                "confidence": v_result.parsed.get("confidence"),
+                "reachability": v_result.parsed.get("reachability"),
+                "attacker_controllability": v_result.parsed.get("attacker_controllability"),
+                "supporting_substrate_edges": v_result.parsed.get("supporting_substrate_edges") or [],
+                "refuting_substrate_edges": v_result.parsed.get("refuting_substrate_edges") or [],
+                "quarantine_reason": v_result.parsed.get("quarantine_reason", ""),
+                "elapsed_sec": round(elapsed, 2),
+                "attempts": len(v_result.attempts),
+                "ok": True,
+            })
             return cand, v_result.parsed, {"ok": True, "attempts": v_result.attempts}
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
             elapsed = time.monotonic() - t0
@@ -331,6 +353,16 @@ def run(
                 cand.get("id"), cand.get("function"),
                 elapsed, err_text[:120],
             )
+            audit_log.append({
+                "stage": "step2.verifier",
+                "candidate_id": cand.get("id"),
+                "function": cand.get("function"),
+                "file": cand.get("file"),
+                "verdict": "<verifier-unreachable>",
+                "elapsed_sec": round(elapsed, 2),
+                "ok": False,
+                "error": err_text[:300],
+            })
             synthetic = _synthetic_unverified_verdict(err_text)
             return cand, synthetic, {"ok": False, "error": err_text[:300]}
 

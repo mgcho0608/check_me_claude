@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
+from ..audit_log import AuditLog
 from ..llm.client import ChatRequest, ChatResponse, chat
 from ..llm.config import Config
 from ..llm.json_call import chat_json, CallResult
@@ -156,6 +157,7 @@ def synthesise_scenarios_chunked(
     min_max_tokens: int = MIN_SYNTH_MAX_TOKENS,
     reasoning_effort: str | None = "high",
     temperature: float | None = DEFAULT_SYNTH_TEMPERATURE,
+    audit_log: AuditLog | None = None,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> ChunkedSynthResult:
     """Run Step 4 over fixed-size chunks of sink-bearing IR ids
@@ -182,6 +184,8 @@ def synthesise_scenarios_chunked(
     contribute zero scenarios but their failure is recorded in
     ``per_chunk`` (PLAN Rule 4 — silent delete is forbidden).
     """
+    if audit_log is None:
+        audit_log = AuditLog.disabled()
     sink_bearing_ids = sorted(collect_sink_bearing_ir_ids(evidence_irs))
     if not sink_bearing_ids:
         chunks: list[list[str]] = []
@@ -227,6 +231,16 @@ def synthesise_scenarios_chunked(
                 idx + 1, chunk_total, len(assigned), produced,
                 len(result.attempts), elapsed,
             )
+            audit_log.append({
+                "stage": "step4.synth",
+                "mode": "chunked",
+                "chunk_index": idx,
+                "assigned": list(assigned),
+                "produced": produced,
+                "attempts": len(result.attempts),
+                "elapsed_sec": round(elapsed, 2),
+                "ok": True,
+            })
             return idx, result, None
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
             elapsed = _time.monotonic() - t0
@@ -235,6 +249,15 @@ def synthesise_scenarios_chunked(
                 "step4.synth: chunk %d/%d FAILED assigned=%d elapsed=%.1fs err=%s",
                 idx + 1, chunk_total, len(assigned), elapsed, err[:120],
             )
+            audit_log.append({
+                "stage": "step4.synth",
+                "mode": "chunked",
+                "chunk_index": idx,
+                "assigned": list(assigned),
+                "elapsed_sec": round(elapsed, 2),
+                "ok": False,
+                "error": err[:300],
+            })
             return idx, None, {"error": err[:300], "assigned_count": len(assigned)}
 
     chunk_results: list[CallResult | None] = [None] * len(chunks)

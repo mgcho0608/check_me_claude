@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
+from ..audit_log import AuditLog
 from ..llm.client import ChatRequest, ChatResponse, chat
 from ..llm.config import Config
 from ..llm.json_call import chat_json, CallResult
@@ -176,6 +177,7 @@ def mine_chunked(
     temperature: float | None = DEFAULT_MINER_TEMPERATURE,
     use_chunk_focused_slice: bool = True,
     chunk_hop_depth: int = 1,
+    audit_log: AuditLog | None = None,
     chat_fn: Callable[[Any, Config, ChatRequest], ChatResponse] = chat,
 ) -> ChunkedMineResult:
     """Run the discovery miner over fixed-size chunks of the
@@ -202,6 +204,8 @@ def mine_chunked(
     0.1). After merge, candidates are sorted by ``(file, function)``
     for stable serialisation.
     """
+    if audit_log is None:
+        audit_log = AuditLog.disabled()
     candidates = sorted(slice_.candidate_functions)
     known_candidates = list(candidates)  # full project pool, not chunk
     if not candidates:
@@ -268,6 +272,15 @@ def mine_chunked(
                 chunk_idx + 1, len(chunks), len(chunk), proposed,
                 len(result.attempts), elapsed,
             )
+            audit_log.append({
+                "stage": "step2.miner",
+                "chunk_index": chunk_idx,
+                "chunk_size": len(chunk),
+                "proposed": proposed,
+                "elapsed_sec": round(elapsed, 2),
+                "attempts": len(result.attempts),
+                "ok": True,
+            })
             return chunk_idx, result, None
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
             elapsed = _time.monotonic() - t0
@@ -276,6 +289,14 @@ def mine_chunked(
                 "step2.miner: chunk %d/%d FAILED assigned=%d elapsed=%.1fs err=%s",
                 chunk_idx + 1, len(chunks), len(chunk), elapsed, err[:120],
             )
+            audit_log.append({
+                "stage": "step2.miner",
+                "chunk_index": chunk_idx,
+                "chunk_size": len(chunk),
+                "elapsed_sec": round(elapsed, 2),
+                "ok": False,
+                "error": err[:300],
+            })
             return chunk_idx, None, {"error": err[:300], "chunk_size": len(chunk)}
 
     chunk_results: list[CallResult | None] = [None] * len(chunks)

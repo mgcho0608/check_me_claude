@@ -62,6 +62,7 @@ import json
 import sys
 from pathlib import Path
 
+from .audit_log import AuditLog, default_audit_path
 from .step1 import call_graph as cg_mod
 from .step1 import regex_baseline as regex_mod
 from .step1 import runner as step1_runner
@@ -308,6 +309,18 @@ def main(argv: list[str] | None = None) -> int:
             " window overflow on well-connected codebases."
         ),
     )
+    p3.add_argument(
+        "--audit-log",
+        default=None,
+        help=(
+            "Path to the per-call audit JSONL. When unset, derives"
+            " <out_dir>/step2_audit.jsonl. Each verifier verdict and"
+            " miner chunk result is appended as one line at the moment"
+            " it completes. Stream-only — the file is NOT read on"
+            " re-run; it preserves work for post-mortem inspection or"
+            " manual recovery."
+        ),
+    )
     p3.set_defaults(func=_step2)
 
     p4 = sub.add_parser(
@@ -349,6 +362,17 @@ def main(argv: list[str] | None = None) -> int:
             " context (default: 3, i.e. N=2 → N=3)."
         ),
     )
+    p4.add_argument(
+        "--audit-log",
+        default=None,
+        help=(
+            "Path to the per-call audit JSONL. When unset, derives"
+            " <out_dir>/step3_audit.jsonl. Each per-EP IR synthesis"
+            " result is appended as one line at the moment it"
+            " completes. Stream-only — the file is NOT read on"
+            " re-run; it preserves work for post-mortem inspection."
+        ),
+    )
     p4.set_defaults(func=_step3)
 
     p5 = sub.add_parser(
@@ -378,6 +402,16 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Concurrent chunked-Step-4 LLM calls (default: 1, i.e."
             " sequential). Raise when provider per-minute quotas allow."
+        ),
+    )
+    p5.add_argument(
+        "--audit-log",
+        default=None,
+        help=(
+            "Path to the per-call audit JSONL. When unset, derives"
+            " <out_dir>/step4_audit.jsonl. Each chunk's scenario"
+            " synthesis (or the single-call result) is appended as"
+            " one line. Stream-only — the file is NOT read on re-run."
         ),
     )
     p5.set_defaults(func=_step4)
@@ -454,13 +488,19 @@ def _step2(args: argparse.Namespace) -> int:
             print(f"error: --source is not a directory: {source_root}", file=sys.stderr)
             return 2
     substrate = json.loads(substrate_path.read_text())
+    out_path = Path(args.out)
+    audit_path = (
+        Path(args.audit_log) if getattr(args, "audit_log", None)
+        else default_audit_path(out_path, "step2")
+    )
+    audit = AuditLog(audit_path)
     output, report = step2_runner.run(
         substrate,
         source_root=source_root,
         miner_use_chunk_focused_slice=not args.no_chunk_focused_slice,
         miner_chunk_hop_depth=args.chunk_hop_depth,
+        audit_log=audit,
     )
-    out_path = Path(args.out)
     step2_runner.write_entrypoints(output, out_path)
     print(
         f"step2: project={report.project!r} cve={report.cve!r}"
@@ -468,6 +508,7 @@ def _step2(args: argparse.Namespace) -> int:
         f" proposed={report.candidates_proposed}"
         f" kept={report.kept} quarantined={report.quarantined}"
         f" elapsed={report.elapsed_sec:.1f}s -> {out_path}"
+        f" audit_log={audit_path}"
     )
     return 0
 
@@ -487,6 +528,11 @@ def _step3(args: argparse.Namespace) -> int:
     if not source_root.is_dir():
         print(f"error: --source is not a directory: {source_root}", file=sys.stderr)
         return 2
+    audit_path = (
+        Path(args.audit_log) if getattr(args, "audit_log", None)
+        else default_audit_path(out_path, "step3")
+    )
+    audit = AuditLog(audit_path)
     output, report = step3_runner.run(
         substrate_path=substrate_path,
         entrypoints_path=entrypoints_path,
@@ -495,6 +541,7 @@ def _step3(args: argparse.Namespace) -> int:
         include_quarantined=args.include_quarantined,
         enable_escalation=not args.no_escalation,
         escalation_hop_depth=args.escalation_hop_depth,
+        audit_log=audit,
     )
     ok = sum(1 for c in report.synth_calls if c.get("ok"))
     fail = sum(1 for c in report.synth_calls if not c.get("ok"))
@@ -503,6 +550,7 @@ def _step3(args: argparse.Namespace) -> int:
         f" entrypoints_used={report.entrypoints_used}/{report.entrypoints_total}"
         f" irs={report.irs_produced} synth_ok={ok} synth_failed={fail}"
         f" elapsed={report.elapsed_sec:.1f}s -> {out_path}"
+        f" audit_log={audit_path}"
     )
     return 0
 
@@ -517,12 +565,18 @@ def _step4(args: argparse.Namespace) -> int:
     if not source_root.is_dir():
         print(f"error: --source is not a directory: {source_root}", file=sys.stderr)
         return 2
+    audit_path = (
+        Path(args.audit_log) if getattr(args, "audit_log", None)
+        else default_audit_path(out_path, "step4")
+    )
+    audit = AuditLog(audit_path)
     output, report = step4_runner.run(
         evidence_irs_path=irs_path,
         source_root=source_root,
         out_path=out_path,
         synth_chunk_size=args.synth_chunk_size,
         synth_max_workers=args.synth_max_workers,
+        audit_log=audit,
     )
     chunk_note = (
         f" chunks={report.synth_call.get('succeeded')}/{report.synth_call.get('chunks')}"
@@ -535,6 +589,7 @@ def _step4(args: argparse.Namespace) -> int:
         f" synth_ok={report.synth_call.get('ok')}"
         f" chunked={report.chunked}{chunk_note}"
         f" elapsed={report.elapsed_sec:.1f}s -> {out_path}"
+        f" audit_log={audit_path}"
     )
     return 0
 
