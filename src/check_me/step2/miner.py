@@ -246,7 +246,7 @@ def mine_chunked(
                 "step2.miner: chunk %d/%d done assigned=%d proposed=%d"
                 " attempts=%d elapsed=%.1fs",
                 chunk_idx + 1, len(chunks), len(chunk), proposed,
-                result.attempts, elapsed,
+                len(result.attempts), elapsed,
             )
             return chunk_idx, result, None
         except Exception as exc:  # noqa: BLE001 — capture-all is the design

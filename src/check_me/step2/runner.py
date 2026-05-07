@@ -250,7 +250,7 @@ def run(
                 _done["n"], _total,
                 cand.get("id"), cand.get("function"),
                 v_result.parsed.get("verdict", "?"),
-                elapsed, v_result.attempts,
+                elapsed, len(v_result.attempts),
             )
             return cand, v_result.parsed, {"ok": True, "attempts": v_result.attempts}
         except Exception as exc:  # noqa: BLE001 — capture-all is the design

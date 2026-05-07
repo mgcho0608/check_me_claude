@@ -225,7 +225,7 @@ def synthesise_scenarios_chunked(
                 "step4.synth: chunk %d/%d done assigned=%d produced=%d"
                 " attempts=%d elapsed=%.1fs",
                 idx + 1, chunk_total, len(assigned), produced,
-                result.attempts, elapsed,
+                len(result.attempts), elapsed,
             )
             return idx, result, None
         except Exception as exc:  # noqa: BLE001 — capture-all is the design
