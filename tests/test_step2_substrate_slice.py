@@ -58,6 +58,78 @@ def test_callback_function_added_to_candidates():
     assert len(s.callback_registrations) == 1
 
 
+def test_cross_tu_callee_added_to_candidates():
+    """A function called from a file other than its own definition
+    file is a generic external-linkage / cross-TU dispatch target
+    (library export, layer-internal entry). The pool picks it up
+    even when no Step 1 category names the function — this is the
+    cut that recovers shared-API entrypoints like mbedtls'
+    ``mbedtls_ssl_read``."""
+    sub = _empty_substrate()
+    # Caller in api.c calls helper(); helper's body is in lib.c
+    # (registered via guards / data_control_flow rows that pin the
+    # body file — same source the def_file map uses).
+    sub["categories"]["call_graph"] = [
+        {"caller": "api_call", "callee": "helper",
+         "file": "api.c", "line": 10, "kind": "direct"},
+    ]
+    sub["categories"]["guards"] = [
+        # A guards row pins helper's body to lib.c.
+        {"function": "helper", "file": "lib.c", "guard_call": "n>0",
+         "guard_line": 5, "result_used": True},
+    ]
+    s = slice_substrate(sub)
+    # helper's def file is lib.c, call site is api.c -> cross-TU ✓
+    assert "helper" in s.candidate_functions
+
+
+def test_intra_tu_callee_NOT_added_to_candidates():
+    """A function called only from within its own definition file
+    is a local helper, not an entrypoint pattern. The cross-TU cut
+    intentionally excludes it so the pool stays bounded — the
+    chunked miner does not need to enumerate every static helper."""
+    sub = _empty_substrate()
+    sub["categories"]["call_graph"] = [
+        {"caller": "outer", "callee": "local_helper",
+         "file": "f.c", "line": 10, "kind": "direct"},
+    ]
+    # outer's body is in f.c (caller pins it); local_helper's body
+    # also in f.c via a guards row.
+    sub["categories"]["guards"] = [
+        {"function": "local_helper", "file": "f.c", "guard_call": "x",
+         "guard_line": 5, "result_used": True},
+    ]
+    s = slice_substrate(sub)
+    # local_helper appears as callee but its def_file == call site
+    # -> NOT a cross-TU candidate. outer is a root (caller-but-
+    # never-callee) so it does enter the pool, but local_helper
+    # should not.
+    assert "local_helper" not in s.candidate_functions
+    assert "outer" in s.candidate_functions  # caller-but-never-callee
+
+
+def test_call_graph_root_added_to_candidates():
+    """A function that appears as a caller but never as a callee
+    is a generic program / module / daemon entry point (``main()``,
+    init, daemon entry). Picked up regardless of Step 1 category
+    membership."""
+    sub = _empty_substrate()
+    sub["categories"]["call_graph"] = [
+        {"caller": "main", "callee": "do_work",
+         "file": "main.c", "line": 5, "kind": "direct"},
+        {"caller": "do_work", "callee": "lib_func",
+         "file": "main.c", "line": 12, "kind": "direct"},
+    ]
+    s = slice_substrate(sub)
+    # main is caller-only -> root.
+    assert "main" in s.candidate_functions
+    # do_work and lib_func appear as callees, so they are not roots
+    # by this cut alone (do_work would also need cross-TU evidence
+    # to enter; here it's intra-file so it stays out).
+    assert "do_work" not in s.candidate_functions
+    assert "lib_func" not in s.candidate_functions
+
+
 def test_call_graph_neighborhood_extracted():
     """Every edge survives the relevance filter now that the
     candidate pool is the union of every function name in the
@@ -80,11 +152,13 @@ def test_call_graph_neighborhood_extracted():
     assert cg_pairs == [("entry", "helper"), ("x", "y"), ("z", "entry")]
 
 
-def test_guards_kept_for_every_named_function():
-    """Now that the candidate pool is the union of every function
-    name in the substrate (so guard.function rows enter the pool
-    too), guards survive the relevance filter regardless of which
-    Step 1 category named the function. The cap bounds the size."""
+def test_guards_filtered_to_neighborhood():
+    """Guards are kept for functions in the candidate-expanded
+    set: candidates plus the neighbors reached via call_graph
+    edges that touch a candidate. ``unrelated`` is not in the
+    pool (guards is not a pool source — see candidate-pool
+    docstring) and not in any neighborhood edge of a candidate,
+    so its guard row is dropped."""
     sub = _empty_substrate()
     sub["categories"]["trust_boundaries"].append({
         "kind": "network_socket", "function": "entry",
@@ -103,7 +177,8 @@ def test_guards_kept_for_every_named_function():
     ]
     s = slice_substrate(sub)
     funcs = sorted(g["function"] for g in s.guards)
-    assert funcs == ["entry", "helper", "unrelated"]
+    assert funcs == ["entry", "helper"]
+    assert "unrelated" not in funcs
 
 
 def test_evidence_anchors_kept_when_file_carries_candidate_relevant_row():

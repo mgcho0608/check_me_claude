@@ -1,21 +1,38 @@
 """Project-agnostic substrate slicing for Step 2 input.
 
 The candidate pool — the set of function names Step 2 will reason
-about — is the union of every function name appearing in the
-substrate. Step 1's category boundaries (which row is a "trust
-boundary", which is a "callback registration") use rule-based
-heuristics that are imperfect by design (PLAN §6 Rule 2: "the
-substrate promise is same input → same output, not 100% correct").
-Using those category labels as a hard gate for the candidate pool
-turns a substrate omission into a Step 2 false negative — the
-candidate is never seen by the miner or verifier. Instead we trust
-Step 1 to enumerate function names accurately, and the verifier
-(with source-excerpt access — see ``step2/runner.py``) decides
-reachability and attacker-controllability per PLAN §6 Rule 2
-("downstream tolerates substrate imperfections") and Rule 2b
-("lossless propagation"). The chunked miner already absorbs pool
-growth: chunk count scales linearly with the pool, per-chunk cost
-stays constant.
+about — is the union of five generic entrypoint patterns drawn
+from substrate categories the schema defines:
+
+ 1. ``trust_boundaries[].function`` — Step 1's explicit attacker-
+    input markers.
+ 2. ``callback_registrations[].callback_function`` and ``[].function``
+    — handler bodies installed under a runtime dispatch slot, plus
+    the registration site function.
+ 3. ``config_mode_command_triggers[].function`` — CLI / option /
+    mode handlers that bind external configuration to a function.
+ 4. ``call_graph`` cross-TU callees — a function called from a file
+    other than its own definition file. This is the language-level
+    "external linkage + cross-TU dispatch" pattern of any modular
+    C codebase: a function exposed in a header and called from a
+    different translation unit is a shared API surface (library
+    export, layer-internal dispatch target, plugin entry hook).
+    Captures cases where Step 1's category labels do NOT name the
+    function — e.g. mbedtls' ``mbedtls_ssl_read`` (not in trust_
+    boundaries / callback_registrations but called from many demo
+    TUs) — without falling back to "every function in the
+    substrate" (which the chunked miner can absorb but at high
+    LLM-call cost).
+ 5. ``call_graph`` roots — functions that appear as a caller but
+    never as a callee. Generic program / module / daemon entry
+    points (``main()``, init functions, library construct hooks).
+
+This split is principled and project-agnostic: every cut roots in
+a language standard or schema-defined category, none branches on a
+project name or symbol pattern. The verifier (with source-excerpt
+access — see ``step2/runner.py``) is responsible for filtering the
+pool further by reading the actual code per PLAN §6 Rule 2
+("downstream tolerates substrate imperfections").
 
 The slice keeps:
 
@@ -24,16 +41,12 @@ The slice keeps:
 - every ``config_mode_command_triggers`` row in a candidate-
   relevant file,
 - every ``call_graph`` edge whose caller OR callee is in the
-  candidate pool (now effectively every edge, since the pool is
-  the union of all named functions),
+  candidate pool,
 - every ``guards`` row whose function is in the expanded set,
 - every ``evidence_anchors`` row in a candidate-relevant file.
 
 Soft caps trim the long tail per category to keep the slice
-JSON-serialisable in a reasonable token budget for downstream
-projection. The caps are large enough that the validated dataset
-suite (lwip / mbedtls / sudo / dnsmasq / libssh) fits without
-trimming.
+JSON-serialisable.
 
 This slicing is **principled**, not dataset-specific. The same rule
 runs unchanged on any C codebase.
@@ -184,10 +197,10 @@ def _select_per_candidate_edges(
 def slice_substrate(
     substrate: dict[str, Any] | str | Path,
     *,
-    max_call_edges: int = 15_000,
-    max_guards: int = 2_000,
-    max_anchors: int = 2_000,
-    max_config_triggers: int = 2_000,
+    max_call_edges: int = 5_000,
+    max_guards: int = 800,
+    max_anchors: int = 800,
+    max_config_triggers: int = 800,
 ) -> SubstrateSlice:
     """Build a :class:`SubstrateSlice` from a Step 1 substrate.
 
@@ -199,9 +212,7 @@ def slice_substrate(
     max_call_edges, max_guards, max_anchors, max_config_triggers
         Soft caps for the slice. The caps trim the long tail of
         rows after the relevance filter so the JSON serialisation
-        is bounded. Defaults are sized to fit the validated dataset
-        suite (lwip / mbedtls / sudo / dnsmasq / libssh) without
-        trimming; downstream chunked miner and per-candidate
+        is bounded; downstream chunked miner and per-candidate
         verifier slices project this further to per-call prompt
         size. Sorting is deterministic so the trimmed set is
         reproducible.
@@ -218,34 +229,59 @@ def slice_substrate(
     trust_rows: list[dict[str, Any]] = list(cats.get("trust_boundaries", []))
     callback_rows: list[dict[str, Any]] = list(cats.get("callback_registrations", []))
     all_config: list[dict[str, Any]] = list(cats.get("config_mode_command_triggers", []))
+    all_edges: list[dict[str, Any]] = list(cats.get("call_graph", []))
 
-    # 1. Candidate pool: union of every function name appearing in
-    #    the substrate. See module docstring for the rationale —
-    #    Step 1 category labels are imperfect heuristics, so we don't
-    #    use them as a hard gate. Walks every category whose schema
-    #    defines a function-named field; project-agnostic.
+    # 1. Candidate pool — five generic entrypoint patterns. See
+    #    module docstring for the rationale of each cut. The split
+    #    keeps the pool meaningfully bounded (no "every helper is a
+    #    candidate" blow-up) while not gating on Step 1 category
+    #    labels which are imperfect heuristics per PLAN §6 Rule 2.
     candidate_funcs: set[str] = set()
 
     def _add(name: Any) -> None:
         if isinstance(name, str) and name:
             candidate_funcs.add(name)
 
+    # 1a. Step 1's explicit attacker-input markers.
     for r in trust_rows:
         _add(r.get("function"))
+    # 1b. Callback handlers + registration-site functions.
     for r in callback_rows:
         _add(r.get("callback_function"))
         _add(r.get("function"))
+    # 1c. Config / mode / command trigger handlers.
     for r in all_config:
         _add(r.get("function"))
-    for r in cats.get("call_graph", []):
-        _add(r.get("caller"))
-        _add(r.get("callee"))
-    for r in cats.get("data_control_flow", []):
-        _add(r.get("function"))
-    for r in cats.get("guards", []):
-        _add(r.get("function"))
-    for r in cats.get("evidence_anchors", []):
-        _add(r.get("function"))
+
+    # 1d. Cross-TU callees — callees whose definition file differs
+    #     from the call-site file. Generic external-linkage
+    #     dispatch pattern of any modular C codebase. Uses the
+    #     same function -> definition-file map Step 3 retrieval
+    #     uses (calls deduce a definition file from rows whose
+    #     `file` pins the function's body, not its call site).
+    func_def_file = _function_def_file_map(cats)
+    for r in all_edges:
+        callee = r.get("callee")
+        call_site_file = r.get("file")
+        if not isinstance(callee, str) or not isinstance(call_site_file, str):
+            continue
+        def_file = func_def_file.get(callee)
+        if def_file and def_file != call_site_file:
+            candidate_funcs.add(callee)
+
+    # 1e. Call-graph roots — caller-but-never-callee. Program /
+    #     module / daemon entry points.
+    callers_set: set[str] = set()
+    callees_set: set[str] = set()
+    for r in all_edges:
+        c = r.get("caller")
+        ce = r.get("callee")
+        if isinstance(c, str):
+            callers_set.add(c)
+        if isinstance(ce, str):
+            callees_set.add(ce)
+    for fn in callers_set - callees_set:
+        candidate_funcs.add(fn)
 
     # 2. Neighborhood: call_graph edges where caller OR callee is a
     #    candidate. Edges are distributed across candidates with a
@@ -253,7 +289,6 @@ def slice_substrate(
     #    by an alphabetical sort + truncate (the prior cap behaviour
     #    silently zeroed out evidence for candidates whose files
     #    sort late, e.g. ``os/net/...`` after ``arch/cpu/...``).
-    all_edges: list[dict[str, Any]] = list(cats.get("call_graph", []))
     neighbor_edges = _select_per_candidate_edges(
         all_edges,
         candidate_funcs=candidate_funcs,
@@ -331,6 +366,61 @@ def _load(substrate: dict | str | Path) -> dict[str, Any]:
     if isinstance(substrate, Path):
         return json.loads(substrate.read_text())
     return json.loads(substrate)
+
+
+def _function_def_file_map(cats: dict[str, Any]) -> dict[str, str]:
+    """Map ``function name -> definition file`` from substrate
+    categories whose ``file`` field pins the function's body.
+
+    Mirrors :func:`step3.retrieval._build_function_def_file_map`
+    so the cross-TU dispatch detection in
+    :func:`slice_substrate` resolves the same callee bodies Step 3
+    sees. Walks every category whose row's ``file`` field records
+    the function's body location:
+
+      - ``call_graph[caller=X]``: the call site is in X's body.
+      - ``data_control_flow[function=X]``, ``guards[function=X]``,
+        ``trust_boundaries[function=X]``,
+        ``callback_registrations[function=X]``: the file is the
+        body file for X.
+
+    NOT used: ``call_graph[callee=X]`` (its file is the call site,
+    not the callee's body) and
+    ``callback_registrations[callback_function=X]`` (its file is
+    the registration site).
+
+    When several files are seen for one name (cross-TU same-name
+    statics), the most-frequent file wins; ties broken by sorted
+    file order so the resolution is deterministic.
+
+    Project-agnostic: only generic substrate fields, no project
+    name or symbol pattern.
+    """
+    from collections import Counter
+
+    counts: dict[str, Counter[str]] = {}
+
+    def _bump(fn: object, file: object) -> None:
+        if not isinstance(fn, str) or not isinstance(file, str):
+            return
+        if fn not in counts:
+            counts[fn] = Counter()
+        counts[fn][file] += 1
+
+    for r in cats.get("call_graph", []):
+        _bump(r.get("caller"), r.get("file"))
+    for cat in (
+        "data_control_flow", "guards",
+        "trust_boundaries", "callback_registrations",
+    ):
+        for r in cats.get(cat, []):
+            _bump(r.get("function"), r.get("file"))
+
+    out: dict[str, str] = {}
+    for fn, c in counts.items():
+        ranked = sorted(c.items(), key=lambda p: (-p[1], p[0]))
+        out[fn] = ranked[0][0]
+    return out
 
 
 # --------------------------------------------------------------------------- #
