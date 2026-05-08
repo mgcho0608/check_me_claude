@@ -1,1 +1,0 @@
-#define BUILD_WITH_SNMP 1

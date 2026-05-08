@@ -29,9 +29,9 @@ the schema's ``kind`` enum:
    vtable-registration idiom: ``struct file_operations fops = {
    .read = my_read, .write = my_write };`` (Linux kernel),
    ``struct ngx_command_t cmds[] = { { ..., my_set_handler, ... } };``
-   (nginx), ``struct process p = { NULL, "name", thread_fn };``
-   (Contiki PROCESS macro expansion). Captured by AST shape, never
-   by macro name.
+   (nginx), or any process / task / state-machine struct whose
+   field is initialised to a thread-body or handler function name.
+   Captured by AST shape, never by macro name.
 
 6. ``callback_argument`` — a function passed as an argument to
    another function call. Every C standard / POSIX function that

@@ -204,19 +204,21 @@ def test_dereference_check_is_a_guard(tmp_path):
 
 
 def test_underflow_style_length_check(tmp_path):
-    """Mirrors contiki-ng uip6.c:1120 ``if (uip_len < UIP_IPH_LEN)``."""
+    """A length-vs-min-header underflow guard — the canonical
+    ``if (len < HEADER_MIN)`` shape that protocol parsers use
+    to drop too-short packets."""
     g = _guards(
         tmp_path,
         """
-        #define UIP_IPH_LEN 40
-        int f(int uip_len) {
-            if (uip_len < UIP_IPH_LEN) return 1;
+        #define HDR_MIN_LEN 40
+        int f(int len) {
+            if (len < HDR_MIN_LEN) return 1;
             return 0;
         }
         """,
     )
     assert len(g) == 1
-    assert "UIP_IPH_LEN" in g[0]["guard_call"]
+    assert "HDR_MIN_LEN" in g[0]["guard_call"]
 
 
 # ----------- non-terminating gating cases: guards-without-enforcement ----

@@ -51,14 +51,5 @@
       "gold": ["substrate", "entrypoints", "evidence_irs", "attack_scenarios"]
     }
   ],
-  "excluded_datasets": [
-    {
-      "id": "contiki-ng-CVE-2021-21281",
-      "project": "contiki-ng",
-      "cve": "CVE-2021-21281",
-      "status": "excluded",
-      "reason": "Source only, no gold labels. Codebase too large for reliable CVE-chain-scoped gold labeling at this time.",
-      "gold": []
-    }
-  ]
+  "excluded_datasets": []
 }

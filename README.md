@@ -108,7 +108,7 @@ evidence_irs.json / attack_scenarios.json은 기존대로 동작).
 
 ### Active datasets
 
-5개 active 데이터셋, 1개 excluded (gold 라벨 없음). 자세한 내용은
+7개 active 데이터셋. 자세한 내용은
 [`datasets/registry.json`](./datasets/registry.json).
 
 | Project | CVE | 상태 |
@@ -117,8 +117,9 @@ evidence_irs.json / attack_scenarios.json은 기존대로 동작).
 | **dnsmasq** | CVE-2017-14491 | active (gold 4종 완비) |
 | **lwip** | CVE-2020-22283 | active (gold 4종 완비) |
 | **mbedtls** | CVE-2018-0488 | active (gold 4종 완비) |
+| **nginx** | CVE-2025-23419 | active (gold 4종 완비) |
 | **sudo** | CVE-2021-3156 | active (gold 4종 완비) |
-| _contiki-ng_ | _CVE-2021-21281_ | excluded — source 만, gold 없음 (codebase 규모로 신뢰성 있는 라벨링 곤란) |
+| **u-boot** | CVE-2018-3968 | active (gold 4종 완비) |
 
 자세한 산출물은 [`out/<project>-<cve>/`](./out/) 참조 (substrate.json /
 entrypoints.json / evidence_irs.json / attack_scenarios.json).

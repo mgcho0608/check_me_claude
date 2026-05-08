@@ -314,9 +314,9 @@ of two axes that feed the same neighborhood set:
     (via `data_control_flow` def_use rows) joins as a state
     neighbour. This recovers chains where the harmful frame is
     not directly callee-reachable but shares a global packet
-    buffer / state struct (e.g. contiki's
-    `process_thread_tcpip_process` → `tcpip_input` → ... →
-    `uip_process` via `uip_buf`).
+    buffer or state struct (a common shape in event-loop
+    networking stacks where lower layers populate a packet
+    buffer that a deeper handler later reads).
 
 **Escalation (N=2 → N=3).** The per-IR LLM may set
 `needs_more_context: true` when it can name a concrete missing
@@ -447,7 +447,7 @@ Target: 3-5 project-level datasets with known scenario-based vulnerabilities bef
 
     d. `kind: "structural_artifact"` (evidence_anchors) only for top-level structural facts (struct / typedef / enum / global / alias macro). **A statement-line write inside a function body is NOT a structural_artifact** — that information lives in `data_control_flow` (def_use, branch, loop). Do not duplicate it in evidence_anchors.
 
-    e. `sink_type: "memory_read"` / `"memory_write"` (attack_scenarios) only for lines that *perform that exact operation*. **A line that corrupts state, where the actual harmful read/write happens downstream, has `sink_type: "state_corruption"`** — the proximate effect at the cited line. The `impact.description` then makes the corruption → consequence chain explicit (e.g. "uip_len underflow at line 1846 → downstream consumers read past uip_buf").
+    e. `sink_type: "memory_read"` / `"memory_write"` (attack_scenarios) only for lines that *perform that exact operation*. **A line that corrupts state, where the actual harmful read/write happens downstream, has `sink_type: "state_corruption"`** — the proximate effect at the cited line. The `impact.description` then makes the corruption → consequence chain explicit (e.g. a length field underflow that lets downstream consumers read past the end of a shared buffer).
 
     f. `trigger_type: "callback"` (entrypoints) only for functions installed via a callback registration mechanism (function-pointer assignment, function table, signal handler, constructor attribute). **A regular internal call site, even if it is the structural pivot for downstream attack reasoning, is NOT a callback trigger** — use `unknown` with a free-text note describing why the function is kept as an entrypoint.
 
@@ -482,7 +482,7 @@ Migration is staged. No big-bang rewrite is allowed.
 **Not in Step 1:** State lifecycle, persistence/cache, and privilege transitions are excluded. In RTOS/firmware contexts, these concepts are structurally weak or absent. They do not belong in the deterministic substrate.
 
 **Exit criteria:**
-1. [x] Clang call graph emits an indirect-edge class the regex baseline cannot represent, and is free of preprocessor-disabled-code false positives. (Original wording — "Clang produces more edges than regex" — turned out to misframe the comparison: a naive regex baseline produces *more* edges by sweeping in `#ifdef`-disabled blocks and macro-name false positives. The architectural advantage is precision and indirect-edge coverage. See `out/STAGE0_REGEX_BASELINE_METRICS.md`.)
+1. [x] Clang call graph emits an indirect-edge class the regex baseline cannot represent, and is free of preprocessor-disabled-code false positives. (Original wording — "Clang produces more edges than regex" — turned out to misframe the comparison: a naive regex baseline produces *more* edges by sweeping in `#ifdef`-disabled blocks and macro-name false positives. The architectural advantage is precision and indirect-edge coverage.)
 2. [x] All 7 substrate categories extracted and output as validated JSON
 3. [x] Output includes line numbers, file paths, function signatures for all facts
 4. [x] Extraction is fully deterministic (same input → same output, no LLM variance)
@@ -579,9 +579,9 @@ After miner merge, every candidate is sent to the verifier independently. The ve
 
 Result: false negatives at the miner stage are bounded by the substrate (any function the substrate cannot link to runtime is still beyond Step 2's reach — a Step 1 boundary, not a Step 2 one). False positives are bounded by the verifier's burden-of-proof and quarantined per Rule 4.
 
-**Cross-stage recovery for substrate-invisible entrypoints.** Some gold-relevant functions are pure call-graph callees that no Step 1 category names (no syscall in body, not registered as a callback, not the body of a process/thread macro). Examples: contiki's `tcpip_input` and `uip_process` — they read from a shared mutable global packet buffer (`uip_buf`), and that buffer is written by lower layers via memcpy chains, not by a syscall the function itself calls. They are not in `candidate_functions`, so the miner never proposes them and the verifier never sees them. Earlier we tried to lift these into Step 1 with a shared-global-read trust-boundary heuristic, and the cost/precision was bad: 480 false positives per 2 true targets on contiki, blowing up Step 2 wall-clock. We reverted.
+**Cross-stage recovery for substrate-invisible entrypoints.** Some gold-relevant functions are pure call-graph callees that no Step 1 category names (no syscall in body, not registered as a callback, not the body of a process/thread macro). The canonical shape is an internal handler that reads from a shared mutable global packet buffer that lower network layers populate via memcpy chains rather than a syscall the function itself calls. Such a handler is not in `candidate_functions`, so the miner never proposes it and the verifier never sees it. Lifting these into Step 1 via a shared-global-read trust-boundary heuristic was tried earlier and rejected — on event-loop networking stacks the precision dropped sharply (hundreds of false positives per real target) and Step 2 wall-clock ballooned.
 
-The principled recovery path is **Step 3's `N=2 hybrid` retrieval**: Evidence IR clusters expand from each `kept` entrypoint by both call-graph hops AND shared-global-state co-readers/writers. From `process_thread_tcpip_process` (kept in Step 2), the call-graph hop reaches `tcpip_input`; the shared-global axis (functions that touch `uip_buf` together) reaches `uip_process`. Both end up in the IR cluster as intermediate frames, even though neither is itself a Step 2 entrypoint. Step 4's exploit-chain synthesis then walks the IR cluster — the entrypoint is the chain start, the bug-bearing frame is somewhere inside the cluster. This split is a deliberate division of labour: Step 2 catalogues the *kicker* of a chain; Step 3 fills in the *body* of a chain by deterministic substrate walks.
+The principled recovery path is **Step 3's `N=2 hybrid` retrieval**: Evidence IR clusters expand from each `kept` entrypoint by both call-graph hops AND shared-global-state co-readers/writers. The call-graph axis reaches direct callees of the kept entrypoint; the shared-global axis reaches functions that touch the same packet buffer or state struct. Both end up in the IR cluster as intermediate frames, even though neither is itself a Step 2 entrypoint. Step 4's exploit-chain synthesis then walks the IR cluster — the entrypoint is the chain start, the bug-bearing frame is somewhere inside the cluster. This split is a deliberate division of labour: Step 2 catalogues the *kicker* of a chain; Step 3 fills in the *body* of a chain by deterministic substrate walks.
 
 **Determinism.** Verifier temperature defaults to 0.0 — same input + same evidence → same verdict, run after run. Miner temperature defaults to 0.1 — proposer's creativity is preserved for cross-chunk discovery while keeping outputs reproducible-in-aggregate (chunk dedup absorbs minor variance).
 
@@ -618,7 +618,7 @@ Escalation is permitted but bounded: the per-IR LLM may signal `needs_more_conte
 Step 1's substrate extractor (and every subsequent extractor) must be project-agnostic. Implementation logic must never:
 
 - branch on dataset name / CVE / project name,
-- hardcode symbol patterns from specific CVEs in the test corpus (e.g. `PROCESS_THREAD`, `ssh_callback_data`, `tcpip_input`) into matching heuristics,
+- hardcode symbol patterns from specific CVEs in the test corpus (e.g. a project-specific name like `ssh_callback_data`, or other corpus-only macro / function names) into matching heuristics,
 - add suffixes / API-name lists / directory-name conventions that bias toward one project's style and away from the C standard / POSIX / widely shared CMake conventions.
 
 Heuristics must be principled (rooted in a language standard, an OS standard, or a broadly shared convention) and documented as such in their docstring. If a particular project's idiom needs special handling, the project's `metadata.json` carries the project-specific configuration (e.g. `-D` flags via `build_commands`); the extractor stays generic.
@@ -805,10 +805,14 @@ This appendix tracks the implemented portion of the 4-step pipeline. Updated as 
 - Regex baseline (`src/check_me/step1/regex_baseline.py`) +
   `regex-compare` CLI subcommand for the architectural-decision
   metric.
-- Datasets: 3 project-level CVE datasets (contiki-ng, libssh,
-  dnsmasq), each with `metadata.json`, vendored `source/` at
-  vulnerable_commit, 4-step gold (substrate / entrypoints /
-  evidence_irs / attack_scenarios), and `notes.md` audit logs.
+- Active project-level CVE datasets registered in
+  `datasets/registry.json`, each with `metadata.json`, vendored
+  `source/` at vulnerable_commit, 4-step gold (substrate /
+  entrypoints / evidence_irs / attack_scenarios), and
+  `notes.md` audit logs. The current set spans canonical
+  authentication-bypass, parser-overflow, and verified-boot CVEs
+  on widely-used C codebases (libssh, dnsmasq, lwip, mbedtls,
+  sudo, nginx, u-boot).
 
 ### Stage 1 — Step 2 (✅ closed)
 
@@ -861,15 +865,16 @@ This appendix tracks the implemented portion of the 4-step pipeline. Updated as 
   state co-readers) with same-name C overload disambiguation;
   per-candidate fairness for the call-graph cap.
 - Tests: ~110 step2/llm test cases.
-- Gold-recovery on the 3 datasets:
+- Gold-recovery summary on the active datasets:
   - libssh: EP-001 (ssh_packet_socket_callback) +
     EP-002 (ssh_packet_process) both kept ✓
   - dnsmasq: EP-001 (receive_query) + EP-002 (tcp_request)
     both kept ✓
-  - contiki: process_thread_tcpip_process kept (PROCESS macro
-    expansion via struct_initializer) — gold's tcpip_input is
-    a substrate-invisible internal callee handled at Step 3 via
-    the N=2 hybrid retrieval.
+  - Other datasets land their gold entrypoints either via
+    direct substrate cuts (trust_boundaries / explicit
+    callback registrations) or via Step 3's N=2 hybrid
+    retrieval when the bug-bearing frame is a substrate-
+    invisible internal callee.
 
 ### Stage 2 — Step 3 + Step 4 (✅ closed)
 
@@ -880,9 +885,10 @@ Step 3 (`src/check_me/step3/`):
   def_use rows.
 - Function→definition-file map built from the substrate so a
   callee defined in one file but called from many resolves to
-  its body file (fixes a bug that left dnsmasq's
-  `add_resource_record` and contiki's deeper IR-stack callees
-  source-less in early iterations).
+  its body file (fixes a bug that left deeper IR-stack callees
+  source-less in early iterations — e.g. dnsmasq's
+  `add_resource_record`, called from many sites but defined in
+  one).
 - Per-IR LLM synthesis (one IR per kept entrypoint), schema-
   validated against `evidence_irs.v1.json`. Per-call failure
   fallback + retry passes mirror Step 2's resilience.
@@ -1021,9 +1027,9 @@ reasoning available):
   synthesis, chunked Step 4 (was `1` sequential under public-
   cloud rate-limit; raised to 4 then 8 after empirical
   measurement on internal-LLM showed no per-request slowdown
-  with additional concurrency on contiki-class workloads —
-  per-candidate verifier averaged 123s at 4 workers, halves at
-  8). Drop to 1 on quota-tight providers.
+  with additional concurrency on large embedded-stack workloads
+  — per-candidate verifier averaged 123s at 4 workers, halves
+  at 8). Drop to 1 on quota-tight providers.
 - Retry cooldown `5s` (was `60s` — same rationale).
 - `max_tokens_ceiling = 131072` (was `65536`) for Step 2 miner /
   Step 3 / Step 4 synthesis; `32768` for Step 2 verifier and
@@ -1053,14 +1059,14 @@ runner kwargs (or env vars where exposed) — drop max_workers to
 (Was open in the prior commit; resolved by chunked Step 4.)
 
 The single-call Step 4 LLM dropped 60+ scenarios silently on
-contiki's 76 confident sink-bearing IRs no matter how the
-coverage rule was phrased — the model abstracted "produce
-representative scenarios" as "produce ~15". Chunked Step 4 (15
-sink-bearing IRs per chunk, Part A coverage rule pinned to
-the assigned subset) removes that failure mode by reducing the
-per-call abstraction surface to a list small enough that the
-LLM treats coverage as a literal rather than a heuristic. The
-same mitigation pattern that fixed Step 2 lossless propagation
-applies here.
+a project that produced 76 confident sink-bearing IRs no
+matter how the coverage rule was phrased — the model
+abstracted "produce representative scenarios" as "produce
+~15". Chunked Step 4 (15 sink-bearing IRs per chunk, Part A
+coverage rule pinned to the assigned subset) removes that
+failure mode by reducing the per-call abstraction surface to a
+list small enough that the LLM treats coverage as a literal
+rather than a heuristic. The same mitigation pattern that
+fixed Step 2 lossless propagation applies here.
 
 ### Stage 3 — Full pipeline evaluation (not yet started)

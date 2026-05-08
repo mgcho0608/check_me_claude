@@ -107,11 +107,10 @@ def _regex_compare(args: argparse.Namespace) -> int:
     """Run the Clang AST call_graph extractor and the regex baseline
     on the same project, then print a comparison report.
 
-    Closes PLAN.md §5 Stage 0 exit criterion 1, which (per the
-    measurement in ``out/STAGE0_REGEX_BASELINE_METRICS.md``) is
-    phrased "Clang call graph emits an indirect-edge class regex
-    cannot represent, and is free of preprocessor-disabled-code
-    false positives" — the architectural advantage is precision +
+    Closes PLAN.md §5 Stage 0 exit criterion 1, phrased "Clang
+    call graph emits an indirect-edge class regex cannot
+    represent, and is free of preprocessor-disabled-code false
+    positives" — the architectural advantage is precision +
     indirect-edge coverage, not raw edge count.
     """
     src = Path(args.src)

@@ -114,12 +114,11 @@ def test_state_axis_pulls_in_co_reader_of_seed_global():
 
 def test_state_axis_uses_hop_1_call_neighbours_not_just_seed():
     """The seed's hop-1 call neighbours also contribute their
-    referenced identifiers to the state axis. Models the
-    ``process_thread_tcpip_process → tcpip_input → uip_input →
-    uip_process`` pattern: ``uip_process`` shares ``uip_buf`` with
-    ``tcpip_input`` (a hop-1 callee of the seed), even though no
-    call edge between seed and ``uip_process`` exists within 2
-    hops."""
+    referenced identifiers to the state axis. Models a generic
+    ``seed → near → far`` shape where ``far`` shares a global
+    buffer with ``near`` (a hop-1 callee of the seed), even
+    though no call edge between seed and ``far`` exists within
+    2 hops."""
     sub = _sub(
         call_graph=[
             {"caller": "seed", "callee": "near", "file": "f.c", "line": 5, "kind": "direct"},

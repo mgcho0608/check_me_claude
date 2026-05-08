@@ -312,7 +312,8 @@ def test_function_with_multiple_attributes_picks_constructor(tmp_path):
 def test_global_struct_with_function_pointer_field_emits_struct_initializer(tmp_path):
     """The vtable-registration idiom: a global struct whose fields
     are initialised with named functions. Captures Linux-kernel
-    ``struct file_operations``, contiki PROCESS expansion, etc."""
+    ``struct file_operations``, any process / state-machine struct
+    whose fields point at handler functions, etc."""
     rows = _cb(
         tmp_path,
         """

@@ -2,14 +2,13 @@
 
 The macro-wrapped-function-definition fallback is the focus
 here — many real-world C codebases (libssh's SSH_PACKET_CALLBACK,
-contiki's PROCESS_THREAD, Linux-kernel macros, OpenSSL
-IMPLEMENT_*, nginx ngx_*) define functions inside an UPPERCASE
-wrapping macro. libclang sees the macro name as the
-FUNCTION_DECL spelling and the real function identifier as a
-child cursor. Without the fallback, ``extract_excerpts`` silently
-drops these — which broke libssh CVE-2018-10933's
-``ssh_packet_userauth_success`` body extraction (sink line=0
-in the IR was the visible symptom).
+Linux-kernel macros, OpenSSL IMPLEMENT_*, nginx ngx_*) define
+functions inside an UPPERCASE wrapping macro. libclang sees the
+macro name as the FUNCTION_DECL spelling and the real function
+identifier as a child cursor. Without the fallback,
+``extract_excerpts`` silently drops these — which broke libssh
+CVE-2018-10933's ``ssh_packet_userauth_success`` body extraction
+(sink line=0 in the IR was the visible symptom).
 
 These tests use synthetic project trees, no project-specific
 content. The fallback rule (FUNCTION_DECL spelling looks like
@@ -37,7 +36,7 @@ from check_me.step3.code_excerpt import (
 
 def test_looks_like_macro_name_accepts_uppercase_underscore():
     assert _looks_like_macro_name("SSH_PACKET_CALLBACK")
-    assert _looks_like_macro_name("PROCESS_THREAD")
+    assert _looks_like_macro_name("DECLARE_HANDLER")
     assert _looks_like_macro_name("MODULE_INIT")
     assert _looks_like_macro_name("_MY_MACRO_")
     # Mixed digits + uppercase ok.
@@ -105,10 +104,11 @@ def test_extract_excerpts_macro_wrapped_function_definition(tmp_path):
     identifier is a child cursor.
 
     Uses a synthetic ``MY_HANDLER`` macro pattern that mirrors
-    the shape of libssh's SSH_PACKET_CALLBACK / contiki's
-    PROCESS_THREAD without referencing either project's name.
-    The fallback rule is project-agnostic — this one synthetic
-    case validates the general mechanism."""
+    the shape of any project's UPPERCASE function-defining
+    wrapper macro (libssh's SSH_PACKET_CALLBACK, OpenSSL
+    IMPLEMENT_*, similar idioms) without referencing a specific
+    project's name. The fallback rule is project-agnostic —
+    this one synthetic case validates the general mechanism."""
     _write(tmp_path, "src/handlers.c", """\
         #define MY_HANDLER(name) \\
             int name(int session, int type, int packet)

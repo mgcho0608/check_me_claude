@@ -111,14 +111,14 @@ def test_alias_macro_emits_structural_artifact(tmp_path):
         tmp_path,
         {
             "f.h": (
-                "struct uip_tcp_hdr {int len;};\n"
-                "extern char uip_buf[];\n"
-                "#define UIP_TCP_BUF ((struct uip_tcp_hdr *)(uip_buf + 40))\n"
+                "struct net_tcp_hdr {int len;};\n"
+                "extern char net_buf[];\n"
+                "#define NET_TCP_BUF ((struct net_tcp_hdr *)(net_buf + 40))\n"
             )
         },
     )
     assert any(
-        r["kind"] == "structural_artifact" and "macro UIP_TCP_BUF" in r["note"]
+        r["kind"] == "structural_artifact" and "macro NET_TCP_BUF" in r["note"]
         for r in rows
     ), rows
 

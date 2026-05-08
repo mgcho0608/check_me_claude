@@ -46,7 +46,7 @@
 
 ### Self-check는 직접 수행 (스크립트 금지)
 
-라벨 작성 후 self-check는 **agent가 직접, 손으로** 수행한다. 자동 스크립트로 통째로 돌려놓고 "OK 떴다"로 통과시키지 않는다. 이유: regex 기반 자동 검증은 매크로(예: `PROCESS_THREAD`), `static` 함수, 익명/wrapper 함수 같은 케이스를 놓치고, "OK"라는 결과가 검증의 깊이를 가린다. 실제 데이터셋 라벨링에서 이 함정에 한 번 빠진 적 있음 (contiki-ng audit log A2-A4, A7 참조).
+라벨 작성 후 self-check는 **agent가 직접, 손으로** 수행한다. 자동 스크립트로 통째로 돌려놓고 "OK 떴다"로 통과시키지 않는다. 이유: regex 기반 자동 검증은 함수형 매크로 확장, `static` 함수, 익명/wrapper 함수 같은 케이스를 놓치고, "OK"라는 결과가 검증의 깊이를 가린다. 실제 데이터셋 라벨링에서 이 함정에 빠진 적이 있어 본 절차로 돌아온 사례가 있다.
 
 #### 절차 (모든 gold 항목에 대해 한 항목씩)
 
@@ -75,7 +75,7 @@
 라벨이 단지 "extractor와 매칭 잘 되게" 보이는 enum으로 force-fit되어 있지 않은지 직접 다시 확인. 점수 inflate가 잘못된 라벨보다 더 나쁘다. 이미 잡은 stretch 패턴들 (corpus가 자라며 추가):
 
 - [ ] `kind: "function_table"` 은 **static array of function names** 만. main-loop 직접 호출이나 protothread/event-dispatch 매크로는 **function table 아님** → `unknown` + free-text.
-- [ ] `kind: "struct_initializer"` (callback_registrations) 은 **global / static struct(또는 array-of-struct, union)의 초기화 시점에 함수 포인터 필드가 함수 이름으로 초기화되는 경우** 만 (Linux `struct file_operations`, contiki `PROCESS()` 매크로 산물 `struct process`, nginx `ngx_command_t cmds[]` 식). 함수 본문 안 대입은 `function_pointer_assignment`, 함수 포인터만 들어간 평면 배열은 `function_table` — 헷갈리면 enum 골라 force-fit하지 말고 `unknown` + free-text.
+- [ ] `kind: "struct_initializer"` (callback_registrations) 은 **global / static struct(또는 array-of-struct, union)의 초기화 시점에 함수 포인터 필드가 함수 이름으로 초기화되는 경우** 만 (Linux `struct file_operations`, nginx `ngx_command_t cmds[]` 식). 함수 본문 안 대입은 `function_pointer_assignment`, 함수 포인터만 들어간 평면 배열은 `function_table` — 헷갈리면 enum 골라 force-fit하지 말고 `unknown` + free-text.
 - [ ] `kind: "callback_argument"` (callback_registrations) 은 **다른 함수 호출의 인자로 함수 이름이 전달된 경우** 만 (`pthread_create(..., fn, ...)`, `atexit(fn)`, `qsort(..., cmp)`, 프로젝트 내부 `register_handler(fn)`). 호출되는 callee 자체는 `call_graph`로 이미 기록됨 — 거기 중복 기재 금지. `signal()`/`bsd_signal()`/`sysv_signal()` 인자는 더 구체적인 `signal_handler` 쪽으로 — `callback_argument`로 적지 말 것.
 - [ ] `kind: "compile_flag"` 은 **`-D<NAME>` 빌드 플래그** 만 (line: 0 관습). `#if` 블록 안 일반 C 라인은 `compile_flag` 행이 아님 → directive 라인을 `kind: "ifdef"` 로 기록.
 - [ ] `kind: "cli_argument"` 은 **CLI 파서 사이트** (예: `getopt` switch case) 만. CLI-gated 동작이 *발현되는* 라인은 cli_argument 행 아님 → `unknown` + free-text.
@@ -105,14 +105,14 @@
 Step 1 substrate extractor를 비롯한 모든 추출/분석 로직은 **반드시 project-agnostic** 이어야 한다. 다음을 절대 하지 않는다:
 
 - 데이터셋 이름 / CVE / 프로젝트 이름으로 분기.
-- 테스트 corpus의 특정 CVE에서 등장한 심볼 패턴 (예: `PROCESS_THREAD`, `ssh_callback_data`, `tcpip_input`) 을 매칭 휴리스틱에 hardcode.
+- 테스트 corpus의 특정 CVE에서 등장한 심볼 패턴 (예: `ssh_callback_data` 같은 이름) 을 매칭 휴리스틱에 hardcode.
 - 한 프로젝트의 명명 스타일에 맞춰 suffix / API 이름 / 디렉토리 이름 리스트를 추가 (C 표준 / POSIX / 일반적인 CMake 관습에서 벗어난 것).
 
 휴리스틱은 **principled** 해야 한다 — 언어 표준, OS 표준, 또는 광범위하게 공유되는 관습에 뿌리를 두고 docstring에 그 근거를 명시. 특정 프로젝트의 idiom에 적응이 필요하면 그 프로젝트의 `metadata.json` 의 `build_commands` 같은 곳에서 외부 설정으로 처리하지, 추출기 코드에 넣지 않는다.
 
 **범용성과 직관성은 핵심 가치**. dataset-tuned 휴리스틱으로 얻은 100% gold-match보다 정직한 추출로 얻은 75% gold-match가 strictly preferable. 새 휴리스틱을 추가할 때는 자문한다: "이 리스트/패턴이 우리 corpus 밖의 일반적인 C 코드에도 의미가 있는가, 아니면 dataset X를 잡으려고 좁게 만든 것인가?" 후자라면 즉시 generalize하거나 제거.
 
-이미 잡힌 사례: `callback_registrations.py` 의 `_is_function_pointer_type` suffix 리스트에 `_data` 가 들어가 있어 libssh의 `ssh_callback_data` 만 잡으려 한 적 있음 (`out/STAGE0_AUDIT_GENERALITY.md` 참조). `cursor.type.get_canonical()` 로 typedef를 expand하면 일반적으로 해결되는 문제였음. 이런 retrofit은 PR 단계에서 잡거나, 안 잡히면 audit 패스에서 잡아 제거.
+이미 잡힌 사례: `callback_registrations.py` 의 `_is_function_pointer_type` suffix 리스트에 `_data` 가 들어가 있어 libssh의 `ssh_callback_data` 만 잡으려 한 적 있음. `cursor.type.get_canonical()` 로 typedef를 expand하면 일반적으로 해결되는 문제였음. 이런 retrofit은 PR 단계에서 잡거나, 안 잡히면 audit 패스에서 잡아 제거.
 
 ## 프로젝트 경로
 - Repo root: `/home/user/check_me_claude`
