@@ -132,6 +132,18 @@ def run(
         )
 
     edges = call_graph.merge_edges(all_edges)
+    # Cross-TU dispatch resolution from non-table callback
+    # registrations (function_pointer_assignment, struct_initializer,
+    # signal_handler, callback_argument). Runs after the per-TU
+    # function-table pass above and after merge so a registration
+    # in init.c and a dispatch in worker.c both resolve.
+    cb_rows_for_resolve = callback_registrations.merge_callback_regs(all_cb)
+    edges = call_graph.merge_edges(
+        edges,
+        dispatch_resolution.resolve_registered_callback_dispatch_edges(
+            edges, cb_rows_for_resolve
+        ),
+    )
     dcf = data_control_flow.merge_dcf(all_dcf)
     guard_rows = guards.merge_guards(all_guards)
     tb_rows = trust_boundaries.merge_trust_boundaries(all_tb)

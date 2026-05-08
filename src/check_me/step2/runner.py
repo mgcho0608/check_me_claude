@@ -48,6 +48,116 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "v1"
 
+# Default per-call source-excerpt caps for the verifier. The LLM
+# only needs enough body to read the candidate and its immediate
+# context; a flat cap keeps the per-call prompt size bounded so
+# parallel verifier calls don't unpredictably exceed provider
+# context budgets. Numbers are soft ceilings — bigger projects
+# stay representative because we round-robin across candidate
+# functions before truncating, and the runner falls back to even
+# tighter caps on input-budget errors.
+DEFAULT_VERIFIER_MAX_SOURCE_EXCERPTS = 12
+DEFAULT_VERIFIER_MAX_SOURCE_CHARS = 40000
+
+
+# --------------------------------------------------------------------------- #
+# Verifier-side helpers — input-budget detection, dispatch-context heuristic,
+# excerpt capping. Module-level so the test suite can call them directly.
+# --------------------------------------------------------------------------- #
+
+
+def _looks_like_input_budget_error(exc: BaseException) -> bool:
+    """True when an LLM error message names the input-token / context-
+    length budget being exceeded.
+
+    The strings checked are vendor-published wording snippets that
+    do not depend on a specific model or provider — they are the
+    surface forms OpenAI / Anthropic / Gemini / vLLM use when the
+    request is too large. Generic by construction: no project name
+    or symbol is consulted."""
+    msg = str(exc).lower()
+    return any(
+        marker in msg
+        for marker in (
+            "input tokens exceed",
+            "context length",
+            "maximum context length",
+            "configured limit",
+        )
+    )
+
+
+def _needs_richer_dispatch_context(cand: dict[str, Any]) -> bool:
+    """True when the candidate's trigger looks like an indirect-
+    dispatch handler (callback / event / boot_phase) and the
+    verifier needs a wider slice + source posture to chase the
+    ingress without tripping over file-locality.
+
+    Generic over substrate categories — looks at ``trigger_type``
+    and any ``callback_registrations[`` citation in
+    ``supporting_substrate_edges``. No symbol or project pattern."""
+    ttype = cand.get("trigger_type", "")
+    if ttype in ("callback", "event", "boot_phase"):
+        return True
+    sup = cand.get("supporting_substrate_edges") or []
+    return any(
+        isinstance(s, str) and "callback_registrations[" in s for s in sup
+    )
+
+
+def _cap_source_excerpts(
+    excerpts: list[Any],
+    *,
+    candidate_function: str,
+    candidate_file: str | None,
+    max_functions: int,
+    max_chars: int,
+) -> list[Any]:
+    """Trim source excerpts to a per-call budget.
+
+    Order: candidate's own function-and-file first, then other
+    excerpts sorted by ``(file, line)`` so trimming is
+    deterministic. ``max_chars`` is computed against each
+    excerpt's ``body`` (assumed string-typed); excerpts whose
+    body misses are still counted by ``max_functions``. The
+    candidate's own excerpt is always kept (we never return an
+    empty list when the input was non-empty)."""
+    if not excerpts:
+        return []
+    own: list[Any] = []
+    rest: list[Any] = []
+    for ex in excerpts:
+        fn = getattr(ex, "function", None)
+        fl = getattr(ex, "file", None)
+        if fn == candidate_function and (
+            candidate_file is None or fl == candidate_file
+        ):
+            own.append(ex)
+        else:
+            rest.append(ex)
+    rest.sort(
+        key=lambda ex: (
+            getattr(ex, "file", "") or "",
+            getattr(ex, "line_start", 0) or 0,
+        )
+    )
+    ordered = own + rest
+
+    kept: list[Any] = []
+    char_total = 0
+    for ex in ordered:
+        if len(kept) >= max_functions:
+            break
+        body = getattr(ex, "body", "") or ""
+        body_len = len(body)
+        if kept and char_total + body_len > max_chars:
+            break
+        kept.append(ex)
+        char_total += body_len
+    if not kept and ordered:
+        kept = [ordered[0]]
+    return kept
+
 
 # --------------------------------------------------------------------------- #
 # Report
@@ -175,6 +285,22 @@ def run(
         # so any client-side state is isolated).
         verifier_client = make_client(verifier_config)
 
+    # libclang warm-up — the first source-excerpt call materialises
+    # the libclang index for the project. Doing it once up-front
+    # avoids a thundering-herd cold-start when verifier calls run
+    # in parallel and several workers race to build the index. A
+    # failure here is non-fatal: each per-candidate call retries on
+    # its own and logs a warning if it can't extract excerpts.
+    if source_root is not None and _extract_excerpts is not None:
+        try:
+            _extract_excerpts(source_root, [])
+        except Exception as warm_exc:  # noqa: BLE001 — non-fatal
+            logger.warning(
+                "step2: libclang warm-up failed — continuing without"
+                " excerpts. err=%s",
+                f"{type(warm_exc).__name__}: {warm_exc}"[:200],
+            )
+
     # 1a. Deterministic synthetic candidates --------------------------------
     # Substrate cuts produce a candidate pool the verifier can
     # consume directly. Bypassing the miner on these saves the
@@ -262,109 +388,284 @@ def run(
     _done = {"n": 0}
     _total = len(proposed)
 
+    def _build_source_excerpts(
+        cand: dict[str, Any],
+        *,
+        hop_depth: int,
+        richer: bool,
+    ) -> list[Any]:
+        """Compute Step-3-style source excerpts for the candidate's
+        ``hop_depth`` neighbourhood, capped per the verifier
+        budget. ``richer`` widens the cap for callback / event
+        handlers whose ingress source-of-truth often sits in a
+        cross-file site that the default cap would clip."""
+        if (
+            source_root is None
+            or _compute_neighborhood is None
+            or _extract_excerpts is None
+        ):
+            return []
+        try:
+            nbhd = _compute_neighborhood(
+                substrate_dict,
+                entry_function=cand.get("function", ""),
+                entry_file=cand.get("file", ""),
+                entry_line=cand.get("line"),
+                hop_depth=hop_depth,
+            )
+            targets = [(n.file, n.function) for n in nbhd.nodes if n.file]
+            raw = list(_extract_excerpts(source_root, targets))
+        except Exception as ex_exc:  # noqa: BLE001
+            logger.warning(
+                "step2.verifier: source-excerpt extraction failed for"
+                " %s(%s) — proceeding without source. err=%s",
+                cand.get("id"), cand.get("function"),
+                f"{type(ex_exc).__name__}: {ex_exc}"[:200],
+            )
+            return []
+        max_fns = 18 if richer else DEFAULT_VERIFIER_MAX_SOURCE_EXCERPTS
+        max_chars = 60000 if richer else DEFAULT_VERIFIER_MAX_SOURCE_CHARS
+        return _cap_source_excerpts(
+            raw,
+            candidate_function=cand.get("function", ""),
+            candidate_file=cand.get("file"),
+            max_functions=max_fns,
+            max_chars=max_chars,
+        )
+
+    def _verify_with_context(
+        cand: dict[str, Any],
+        focused_slice: SubstrateSlice,
+        excerpts: list[Any],
+    ) -> tuple[Any, float]:
+        """Single verifier call with timing. Returns (result, elapsed)."""
+        t0 = time.monotonic()
+        result = verifier_mod.verify_one(
+            client=verifier_client,
+            config=verifier_config,
+            slice_=focused_slice,
+            candidate=cand,
+            source_excerpts=excerpts or None,
+            chat_fn=chat_fn,
+        )
+        return result, time.monotonic() - t0
+
     def _attempt_verify(cand: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         """Return (cand, verdict, info). info has ``ok: bool`` and
         either ``attempts`` (on success) or ``error`` (on failure).
         On failure a synthetic quarantined verdict is returned so
-        the run never partially-fails."""
+        the run never partially-fails.
+
+        Multi-tier fallback. The first call uses the default
+        per-candidate slice + source excerpts (hop=2 + richer
+        caps for callback / event handlers, hop=1 + tighter caps
+        otherwise). Two recovery branches:
+
+        1. **Quarantine retry for callback / event candidates.**
+           When the first call returns ``quarantined`` AND the
+           candidate looks like an indirect-dispatch handler, retry
+           with a wider slice (``include_global_trust_boundaries=
+           True``, ``hop_depth=3``) and richer source excerpts.
+           This is lossless propagation for the quarantine layer
+           — a handler whose ingress lives one hop outside the
+           default neighbourhood gets a second chance before being
+           filed under quarantine.
+
+        2. **Input-budget shrink retry on overflow.** When the LLM
+           call raises with a context-length / input-token error,
+           shrink the source excerpts (max=1 / 8000 chars) and
+           retry. A second overflow narrows further to
+           hop_depth=1 + candidate-only source. Only after that
+           do we emit the synthetic quarantined verdict.
+        """
+        function_name = cand.get("function", "")
+        candidate_file = cand.get("file")
+        richer_dispatch = _needs_richer_dispatch_context(cand)
+
         focused = slice_for_candidate(
             slice_,
-            candidate_function=cand.get("function", ""),
-            candidate_file=cand.get("file"),
+            candidate_function=function_name,
+            candidate_file=candidate_file,
+            include_global_trust_boundaries=richer_dispatch,
         )
-        # Source excerpts of the candidate + 1-hop neighbourhood.
         # The verifier's question is "is this candidate an
         # entrypoint?" — answered by reading the candidate's body
-        # and its immediate callers / callees. 1 hop suffices.
-        # Step 3's IR synthesis (different concern: full attack
-        # chain from entry to sink) keeps the N=2 hybrid retrieval
-        # — that need does not apply here. A hop=2 walk on dense
-        # codebases pulls in 100-200 functions per verifier call;
-        # hop=1 typically pulls in ~10-30, which is the bulk of
-        # the per-call latency saving.
-        excerpts: list[Any] = []
-        if (
-            source_root is not None
-            and _compute_neighborhood is not None
-            and _extract_excerpts is not None
-        ):
-            try:
-                nbhd = _compute_neighborhood(
-                    substrate_dict,
-                    entry_function=cand.get("function", ""),
-                    entry_file=cand.get("file", ""),
-                    entry_line=cand.get("line"),
-                    hop_depth=1,
-                )
-                targets = [(n.file, n.function) for n in nbhd.nodes if n.file]
-                excerpts = list(_extract_excerpts(source_root, targets))
-            except Exception as ex_exc:  # noqa: BLE001
-                logger.warning(
-                    "step2.verifier: source-excerpt extraction failed for"
-                    " %s(%s) — proceeding without source. err=%s",
-                    cand.get("id"), cand.get("function"),
-                    f"{type(ex_exc).__name__}: {ex_exc}"[:200],
-                )
-                excerpts = []
-        t0 = time.monotonic()
+        # and its immediate callers / callees. hop=1 suffices for
+        # most candidates; callback/event handlers benefit from
+        # hop=2 because the dispatch-resolved indirect edges land
+        # one hop further than the registration site.
+        excerpts = _build_source_excerpts(
+            cand,
+            hop_depth=2 if richer_dispatch else 1,
+            richer=richer_dispatch,
+        )
         try:
-            v_result = verifier_mod.verify_one(
-                client=verifier_client,
-                config=verifier_config,
-                slice_=focused,
-                candidate=cand,
-                source_excerpts=excerpts or None,
-                chat_fn=chat_fn,
-            )
-            elapsed = time.monotonic() - t0
-            _done["n"] += 1
-            verdict_str = v_result.parsed.get("verdict", "?")
-            logger.info(
-                "step2.verifier: %d/%d %s(%s) verdict=%s elapsed=%.1fs attempts=%d",
-                _done["n"], _total,
-                cand.get("id"), cand.get("function"),
-                verdict_str,
-                elapsed, len(v_result.attempts),
-            )
-            audit_log.append({
-                "stage": "step2.verifier",
-                "candidate_id": cand.get("id"),
-                "function": cand.get("function"),
-                "file": cand.get("file"),
-                "verdict": verdict_str,
-                "confidence": v_result.parsed.get("confidence"),
-                "reachability": v_result.parsed.get("reachability"),
-                "attacker_controllability": v_result.parsed.get("attacker_controllability"),
-                "supporting_substrate_edges": v_result.parsed.get("supporting_substrate_edges") or [],
-                "refuting_substrate_edges": v_result.parsed.get("refuting_substrate_edges") or [],
-                "quarantine_reason": v_result.parsed.get("quarantine_reason", ""),
-                "elapsed_sec": round(elapsed, 2),
-                "attempts": len(v_result.attempts),
-                "ok": True,
-            })
-            return cand, v_result.parsed, {"ok": True, "attempts": v_result.attempts}
-        except Exception as exc:  # noqa: BLE001 — capture-all is the design
-            elapsed = time.monotonic() - t0
+            v_result, elapsed = _verify_with_context(cand, focused, excerpts)
+        except Exception as exc:  # noqa: BLE001
             err_text = f"{type(exc).__name__}: {exc}"
-            _done["n"] += 1
-            logger.warning(
-                "step2.verifier: %d/%d %s(%s) FAILED elapsed=%.1fs err=%s",
-                _done["n"], _total,
-                cand.get("id"), cand.get("function"),
-                elapsed, err_text[:120],
+            if _looks_like_input_budget_error(exc):
+                # Tier 1 retry: shrink source.
+                shrunk = _cap_source_excerpts(
+                    excerpts,
+                    candidate_function=function_name,
+                    candidate_file=candidate_file,
+                    max_functions=1,
+                    max_chars=8000,
+                )
+                logger.info(
+                    "step2.verifier: %s(%s) input-budget overflow on first"
+                    " attempt — shrinking source to %d excerpt(s) and"
+                    " retrying",
+                    cand.get("id"), function_name, len(shrunk),
+                )
+                try:
+                    v_result, elapsed = _verify_with_context(
+                        cand, focused, shrunk
+                    )
+                    fallback_label = "source_cap"
+                    excerpts = shrunk
+                except Exception as exc2:  # noqa: BLE001
+                    if _looks_like_input_budget_error(exc2):
+                        # Tier 2 retry: hop=1 slice + candidate-only.
+                        hop1_focused = slice_for_candidate(
+                            slice_,
+                            candidate_function=function_name,
+                            candidate_file=candidate_file,
+                            hop_depth=1,
+                            include_global_trust_boundaries=False,
+                        )
+                        candidate_only = _cap_source_excerpts(
+                            excerpts,
+                            candidate_function=function_name,
+                            candidate_file=candidate_file,
+                            max_functions=1,
+                            max_chars=8000,
+                        )
+                        logger.info(
+                            "step2.verifier: %s(%s) input-budget overflow"
+                            " again — narrowing to hop=1 slice +"
+                            " candidate-only source and retrying",
+                            cand.get("id"), function_name,
+                        )
+                        try:
+                            v_result, elapsed = _verify_with_context(
+                                cand, hop1_focused, candidate_only
+                            )
+                            fallback_label = "hop1_source_cap"
+                            focused = hop1_focused
+                            excerpts = candidate_only
+                        except Exception as exc3:  # noqa: BLE001
+                            return _record_failure(cand, exc3)
+                    else:
+                        return _record_failure(cand, exc2)
+            else:
+                return _record_failure(cand, exc)
+        else:
+            fallback_label = None
+
+        verdict_str = v_result.parsed.get("verdict", "?")
+
+        # Tier-3 (quarantine retry for callback / event handlers):
+        # if a richer-dispatch candidate is quarantined on the
+        # first pass, broaden the slice (hop=3 + global trust
+        # boundaries) and re-attempt. The broader slice often
+        # surfaces an ingress site one hop outside the default
+        # neighbourhood that flips the verdict honestly.
+        if (
+            verdict_str == "quarantined"
+            and richer_dispatch
+            and fallback_label is None
+        ):
+            wider_focused = slice_for_candidate(
+                slice_,
+                candidate_function=function_name,
+                candidate_file=candidate_file,
+                hop_depth=3,
+                include_global_trust_boundaries=True,
             )
-            audit_log.append({
-                "stage": "step2.verifier",
-                "candidate_id": cand.get("id"),
-                "function": cand.get("function"),
-                "file": cand.get("file"),
-                "verdict": "<verifier-unreachable>",
-                "elapsed_sec": round(elapsed, 2),
-                "ok": False,
-                "error": err_text[:300],
-            })
-            synthetic = _synthetic_unverified_verdict(err_text)
-            return cand, synthetic, {"ok": False, "error": err_text[:300]}
+            wider_excerpts = _build_source_excerpts(
+                cand, hop_depth=3, richer=True,
+            )
+            logger.info(
+                "step2.verifier: %s(%s) quarantined on first pass —"
+                " retrying with wider dispatch context (hop=3, global"
+                " trust boundaries)",
+                cand.get("id"), function_name,
+            )
+            try:
+                wider_result, wider_elapsed = _verify_with_context(
+                    cand, wider_focused, wider_excerpts
+                )
+            except Exception as wider_exc:  # noqa: BLE001
+                logger.warning(
+                    "step2.verifier: %s(%s) wider-context retry failed —"
+                    " keeping first-pass quarantine. err=%s",
+                    cand.get("id"), function_name,
+                    f"{type(wider_exc).__name__}: {wider_exc}"[:120],
+                )
+            else:
+                v_result = wider_result
+                elapsed = wider_elapsed
+                verdict_str = v_result.parsed.get("verdict", "?")
+                fallback_label = "dispatch_context"
+
+        _done["n"] += 1
+        logger.info(
+            "step2.verifier: %d/%d %s(%s) verdict=%s elapsed=%.1fs"
+            " attempts=%d fallback=%s",
+            _done["n"], _total,
+            cand.get("id"), cand.get("function"),
+            verdict_str,
+            elapsed, len(v_result.attempts),
+            fallback_label or "none",
+        )
+        audit_log.append({
+            "stage": "step2.verifier",
+            "candidate_id": cand.get("id"),
+            "function": cand.get("function"),
+            "file": cand.get("file"),
+            "verdict": verdict_str,
+            "confidence": v_result.parsed.get("confidence"),
+            "reachability": v_result.parsed.get("reachability"),
+            "attacker_controllability": v_result.parsed.get("attacker_controllability"),
+            "supporting_substrate_edges": v_result.parsed.get("supporting_substrate_edges") or [],
+            "refuting_substrate_edges": v_result.parsed.get("refuting_substrate_edges") or [],
+            "quarantine_reason": v_result.parsed.get("quarantine_reason", ""),
+            "elapsed_sec": round(elapsed, 2),
+            "attempts": len(v_result.attempts),
+            "fallback": fallback_label or "none",
+            "ok": True,
+        })
+        info: dict[str, Any] = {
+            "ok": True,
+            "attempts": v_result.attempts,
+        }
+        if fallback_label is not None:
+            info["fallback"] = fallback_label
+        return cand, v_result.parsed, info
+
+    def _record_failure(
+        cand: dict[str, Any], exc: BaseException
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        err_text = f"{type(exc).__name__}: {exc}"
+        _done["n"] += 1
+        logger.warning(
+            "step2.verifier: %d/%d %s(%s) FAILED err=%s",
+            _done["n"], _total,
+            cand.get("id"), cand.get("function"),
+            err_text[:120],
+        )
+        audit_log.append({
+            "stage": "step2.verifier",
+            "candidate_id": cand.get("id"),
+            "function": cand.get("function"),
+            "file": cand.get("file"),
+            "verdict": "<verifier-unreachable>",
+            "ok": False,
+            "error": err_text[:300],
+        })
+        synthetic = _synthetic_unverified_verdict(err_text)
+        return cand, synthetic, {"ok": False, "error": err_text[:300]}
 
     # First pass — bounded parallelism (default sequential for verifier).
     logger.info(

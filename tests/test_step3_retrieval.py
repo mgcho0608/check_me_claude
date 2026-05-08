@@ -226,7 +226,7 @@ def test_no_dataset_specific_branching():
     b = _sub(
         call_graph=[{"caller": "f", "callee": "g", "file": "x.c", "line": 1, "kind": "direct"}],
     )
-    a["project"] = "contiki-ng"; b["project"] = "libssh"
+    a["project"] = "proj-a"; b["project"] = "proj-b"
     na = compute_neighborhood(a, entry_function="f", entry_file="x.c")
     nb = compute_neighborhood(b, entry_function="f", entry_file="x.c")
     # The retrieval depends on substrate, not on project name.

@@ -3,10 +3,12 @@
 Each test compiles a tiny synthetic project under tmp_path, runs the
 full step1 runner, and asserts on the guards rows.
 
-Definition under test: a *guard* is an ``if`` whose taken branch
-terminates the current execution path (return / goto / break /
-continue, possibly inside a single-branch compound). See guards.py
-for the full list of supported forms.
+Definition under test: every project-local ``if`` is a guard.
+``enforcement_line`` is filled when the taken branch terminates the
+current execution path (return / goto / break / continue, possibly
+inside a single-branch compound). Otherwise the guard row is still
+emitted with no ``enforcement_line`` field — see guards.py for the
+full list of supported terminator forms.
 """
 
 from __future__ import annotations
@@ -217,10 +219,13 @@ def test_underflow_style_length_check(tmp_path):
     assert "UIP_IPH_LEN" in g[0]["guard_call"]
 
 
-# ----------- negative cases: NOT guards -----------
+# ----------- non-terminating gating cases: guards-without-enforcement ----
 
 
-def test_if_with_non_terminating_then_is_not_a_guard(tmp_path):
+def test_if_with_non_terminating_then_is_a_guard_without_enforcement(tmp_path):
+    """An if whose then-branch falls through is still a guard — the
+    predicate gates which path runs — but with no
+    ``enforcement_line`` field."""
     g = _guards(
         tmp_path,
         """
@@ -231,10 +236,12 @@ def test_if_with_non_terminating_then_is_not_a_guard(tmp_path):
         }
         """,
     )
-    assert g == []
+    assert len(g) == 1
+    assert "x > 0" in g[0]["guard_call"]
+    assert "enforcement_line" not in g[0]
 
 
-def test_if_else_without_terminator_is_not_a_guard(tmp_path):
+def test_if_else_without_terminator_is_still_a_guard(tmp_path):
     g = _guards(
         tmp_path,
         """
@@ -245,10 +252,14 @@ def test_if_else_without_terminator_is_not_a_guard(tmp_path):
         }
         """,
     )
-    assert g == []
+    assert len(g) == 1
+    assert "enforcement_line" not in g[0]
 
 
 def test_while_loop_alone_is_not_a_guard(tmp_path):
+    """While-loops are recorded in ``data_control_flow`` (kind=loop),
+    not in guards. Loops gate iteration count, not branch selection
+    in the guard sense."""
     g = _guards(
         tmp_path,
         """
@@ -260,6 +271,28 @@ def test_while_loop_alone_is_not_a_guard(tmp_path):
         """,
     )
     assert g == []
+
+
+def test_compound_then_without_final_terminator_is_still_a_guard(tmp_path):
+    """A compound block whose last meaningful statement is NOT a
+    terminator is still emitted as a guard, but without
+    ``enforcement_line`` — the predicate gates the block, but the
+    block doesn't reject."""
+    g = _guards(
+        tmp_path,
+        """
+        int log_msg(const char*);
+        int f(int x) {
+            if (x < 0) {
+                log_msg("warn");
+                /* fall through to normal path */
+            }
+            return x;
+        }
+        """,
+    )
+    assert len(g) == 1
+    assert "enforcement_line" not in g[0]
 
 
 def test_switch_emits_one_guard_row_with_switch_call_in_guard_call(tmp_path):
@@ -287,23 +320,6 @@ def test_switch_emits_one_guard_row_with_switch_call_in_guard_call(tmp_path):
     assert row["guard_call"].startswith("switch (")
     assert "x" in row["guard_call"]
     assert row["result_used"] is True
-
-
-def test_compound_then_without_final_terminator_is_not_a_guard(tmp_path):
-    g = _guards(
-        tmp_path,
-        """
-        int log_msg(const char*);
-        int f(int x) {
-            if (x < 0) {
-                log_msg("warn");
-                /* fall through to normal path */
-            }
-            return x;
-        }
-        """,
-    )
-    assert g == []
 
 
 # ----------- structural / cross-function -----------
@@ -355,8 +371,10 @@ def test_guard_inside_loop(tmp_path):
 
 
 def test_guard_inside_else_branch_is_recorded(tmp_path):
-    """An if inside an else clause whose then-branch terminates is its
-    own guard."""
+    """The outer if (with non-terminating then) AND the inner if
+    inside the else (with terminating then) are both recorded.
+    The outer guard is enforcement-less; the inner one has
+    ``enforcement_line`` filled."""
     g = _guards(
         tmp_path,
         """
@@ -370,8 +388,13 @@ def test_guard_inside_else_branch_is_recorded(tmp_path):
         }
         """,
     )
-    assert len(g) == 1
-    assert "y < 0" in g[0]["guard_call"]
+    assert len(g) == 2
+    by_call = {r["guard_call"]: r for r in g}
+    assert "x > 0" in by_call
+    inner = next(r for k, r in by_call.items() if "y < 0" in k)
+    assert inner["enforcement_line"] == inner["guard_line"]
+    outer = by_call["x > 0"]
+    assert "enforcement_line" not in outer
 
 
 def test_external_header_guards_are_not_emitted(tmp_path):

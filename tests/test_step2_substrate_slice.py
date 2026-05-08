@@ -705,12 +705,12 @@ def test_no_dataset_specific_branching():
     """The slicer must not behave differently for any specific
     project name. Same logical input + different project name →
     same shape."""
-    a = _empty_substrate("contiki-ng", "CVE-X")
+    a = _empty_substrate("proj-a", "CVE-X")
     a["categories"]["trust_boundaries"].append(
         {"kind": "network_socket", "function": "f",
          "file": "x.c", "line": 1, "direction": "untrusted_to_trusted"}
     )
-    b = _empty_substrate("libssh", "CVE-Y")
+    b = _empty_substrate("proj-b", "CVE-Y")
     b["categories"]["trust_boundaries"].append(
         {"kind": "network_socket", "function": "f",
          "file": "x.c", "line": 1, "direction": "untrusted_to_trusted"}
@@ -721,3 +721,154 @@ def test_no_dataset_specific_branching():
     sa_d = sa.to_json_dict(); sa_d.pop("project"); sa_d.pop("cve")
     sb_d = sb.to_json_dict(); sb_d.pop("project"); sb_d.pop("cve")
     assert sa_d == sb_d
+
+
+# --------------------------------------------------------------------------- #
+# Synthetic-candidate richer supporting edges
+# --------------------------------------------------------------------------- #
+
+
+from check_me.step2.substrate_slice import (
+    slice_for_candidate,
+    synthetic_candidates_from_substrate,
+)
+
+
+def test_synthetic_candidate_callback_handler_carries_anchor_supporting_edges():
+    """A handler entrypoint produced from a callback_registration row
+    should carry, on top of its trigger_ref, citations of (a) the
+    incoming call edge that dispatches into it and (b) the caller's
+    own trust / callback registration evidence — so the verifier
+    sees the upstream ingress without a second retrieval round."""
+    sub = _empty_substrate("proj-a", "CVE-X")
+    sub["categories"]["trust_boundaries"].append({
+        "kind": "network_socket", "function": "ingest",
+        "file": "io.c", "line": 5,
+        "direction": "untrusted_to_trusted",
+    })
+    sub["categories"]["callback_registrations"].append({
+        "registration_site": "table[]",
+        "callback_function": "handler",
+        "function": "register",
+        "file": "init.c", "line": 8,
+        "kind": "function_table",
+    })
+    sub["categories"]["call_graph"].append({
+        "caller": "ingest", "callee": "handler",
+        "file": "io.c", "line": 12, "kind": "indirect",
+        "note": "dispatch",
+    })
+
+    cands = synthetic_candidates_from_substrate(sub)
+    by_fn = {c["function"]: c for c in cands}
+    handler = by_fn["handler"]
+    sup = handler["supporting_substrate_edges"]
+    # Trigger_ref is preserved at the head.
+    assert sup[0].startswith("callback_registrations[")
+    # Caller-side ingress is cited.
+    assert any("trust_boundaries[function='ingest'" in s
+               or "trust_boundaries[function=ingest" in s
+               for s in sup)
+    # The dispatch edge itself is cited.
+    assert any(
+        "call_graph[" in s and "ingest" in s and "handler" in s
+        for s in sup
+    )
+
+
+def test_synthetic_candidate_closure_callee_inherits_event_trigger_from_anchor():
+    """A function reachable as a 1-hop callee of a network-socket
+    trust_boundary should be flagged ``trigger_type=event`` with
+    citations of the upstream boundary + the bridging call edge."""
+    sub = _empty_substrate("proj-a", "CVE-X")
+    sub["categories"]["trust_boundaries"].append({
+        "kind": "network_socket", "function": "recv_loop",
+        "file": "io.c", "line": 10,
+        "direction": "untrusted_to_trusted",
+    })
+    sub["categories"]["call_graph"].append({
+        "caller": "recv_loop", "callee": "deserialise",
+        "file": "io.c", "line": 12, "kind": "direct",
+    })
+
+    cands = synthetic_candidates_from_substrate(sub)
+    by_fn = {c["function"]: c for c in cands}
+    deser = by_fn["deserialise"]
+    assert deser["trigger_type"] == "event"
+    sup = deser["supporting_substrate_edges"]
+    assert any("trust_boundaries[" in s and "recv_loop" in s for s in sup)
+    assert any(
+        "call_graph[" in s and "recv_loop" in s and "deserialise" in s
+        for s in sup
+    )
+
+
+def test_slice_for_candidate_keeps_callback_registration_when_handler_in_neighborhood_other_file():
+    """The handler's body sits in worker.c; the registration row's
+    file is init.c (registration site). The focused slice for the
+    handler must keep the registration row even though their files
+    differ — match on ``callback_function`` name alone."""
+    full = SubstrateSlice(
+        project="proj-a", cve="CVE-X",
+        candidate_functions=["handler"],
+        trust_boundaries=[],
+        callback_registrations=[
+            {"registration_site": "table[]",
+             "callback_function": "handler",
+             "file": "init.c", "line": 5,
+             "kind": "function_table"},
+        ],
+        call_graph=[],
+        guards=[],
+        evidence_anchors=[],
+        config_mode_command_triggers=[],
+    )
+    focused = slice_for_candidate(
+        full,
+        candidate_function="handler",
+        candidate_file="worker.c",
+    )
+    assert any(
+        r["callback_function"] == "handler"
+        for r in focused.callback_registrations
+    )
+
+
+def test_slice_for_candidate_include_global_trust_boundaries_keeps_off_neighborhood_rows():
+    """When the runner asks for the wider posture (callback / event
+    candidates), every project trust_boundary survives the slice
+    so the verifier can cite cross-file ingress — even rows in
+    files completely outside the candidate's neighbourhood."""
+    full = SubstrateSlice(
+        project="proj-a", cve="CVE-X",
+        candidate_functions=["handler"],
+        trust_boundaries=[
+            {"function": "far_ingress", "file": "elsewhere.c",
+             "line": 2, "kind": "network_socket",
+             "direction": "untrusted_to_trusted"},
+        ],
+        callback_registrations=[],
+        call_graph=[],
+        guards=[],
+        evidence_anchors=[],
+        config_mode_command_triggers=[],
+    )
+    focused = slice_for_candidate(
+        full,
+        candidate_function="handler",
+        candidate_file="worker.c",
+        include_global_trust_boundaries=True,
+    )
+    assert any(
+        r["function"] == "far_ingress" for r in focused.trust_boundaries
+    )
+    # And the default posture trims it.
+    focused_default = slice_for_candidate(
+        full,
+        candidate_function="handler",
+        candidate_file="worker.c",
+    )
+    assert all(
+        r["function"] != "far_ingress"
+        for r in focused_default.trust_boundaries
+    )

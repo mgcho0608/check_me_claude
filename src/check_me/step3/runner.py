@@ -199,6 +199,23 @@ def run(
     if client is None:
         client = make_client(config)
 
+    # libclang warm-up — the first source-excerpt call materialises
+    # the libclang index for the project. Doing it once up-front
+    # avoids a thundering-herd cold-start when per-IR synthesis
+    # runs in parallel (Step 3 is per-kept-entrypoint and several
+    # workers race to build the index otherwise). A failure here
+    # is non-fatal: each per-IR call has its own try/except and a
+    # warning here documents that the worker fell back to a
+    # cold-start path.
+    try:
+        extract_excerpts(source_root, [])
+    except Exception as warm_exc:  # noqa: BLE001 — non-fatal
+        logger.warning(
+            "step3: source-excerpt warm-up failed — continuing."
+            " Per-IR calls will retry. err=%s",
+            f"{type(warm_exc).__name__}: {warm_exc}"[:200],
+        )
+
     def _attempt_at_depth(
         ep: dict[str, Any], hop_depth: int,
     ) -> tuple[dict[str, Any], int, int, int, int]:

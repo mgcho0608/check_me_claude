@@ -172,13 +172,18 @@ def chat_json(
         )
 
         # 1. Truncated -> bump and retry.
-        if response.finish_reason == "length":
+        # Chat Completions reports ``finish_reason="length"``;
+        # Responses-API surfaces ``incomplete_details.reason``,
+        # commonly ``"max_output_tokens"``. Both are the same
+        # signal — visible output was clipped by the budget.
+        if response.finish_reason in ("length", "max_output_tokens"):
             attempt_record["outcome"] = "length_truncated"
             attempts.append(attempt_record)
             if cur_max_tokens >= max_tokens_ceiling:
                 raise JsonCallError(
                     "Hit max_tokens ceiling and provider still returned"
-                    f" finish_reason=length after {attempt_idx + 1} attempts.",
+                    f" finish_reason indicating truncation after"
+                    f" {attempt_idx + 1} attempts.",
                     attempts,
                 )
             cur_max_tokens = min(cur_max_tokens * 2, max_tokens_ceiling)

@@ -293,7 +293,13 @@ Critique fields:
   input the function receives? Cite specific trust_boundaries,
   callback_registrations, or source-level evidence (an external
   socket read, an argv parse, a callback dispatched from a
-  network handler).
+  network handler). Explicit byte parameters are not required:
+  for timer / callback / event handlers the attacker-conditioned
+  input may be **mutable session / connection / heap state that
+  earlier untrusted ingress populated**. Cite the substrate row
+  or source excerpt that shows this earlier ingress when relying
+  on this form (e.g. a network read elsewhere that writes the
+  same buffer / struct field this handler later reads).
 - assumptions: what runtime conditions must hold for this
   candidate to fire? (build-config flags, deployed configuration,
   mode flags, an open listener, an established session, etc.)
@@ -319,6 +325,11 @@ Hard constraints:
   trigger at runtime — not merely that it touches an
   attacker-relevant API in isolation, AND
   (b) the attacker can shape the bytes the function consumes.
+  For arg-less timer / callback / event handlers, criterion (b)
+  is also satisfied when the source or substrate positively
+  shows that earlier untrusted ingress can pre-condition the
+  mutable session / connection / heap state the handler acts on
+  — cite the ingress site explicitly when leaning on this form.
   Absence of refuting evidence is NOT sufficient — speculative
   reachability or speculative controllability means quarantine.
   False positives in the kept bucket pollute downstream Step 3;

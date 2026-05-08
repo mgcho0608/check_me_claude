@@ -781,11 +781,27 @@ This appendix tracks the implemented portion of the 4-step pipeline. Updated as 
   array DeclRefExpr) is exact; Pattern B (struct-field MemberRef)
   is broad-match across same-TU function tables — a deliberate
   lossless-propagation choice so the verifier filters per
-  candidate. Project-agnostic by construction (only AST cursor
-  kinds and existing function_table rows; no symbol or naming
-  heuristic). Closes the libssh CVE-2018-10933 P3b gap where
-  ``ssh_packet_process → ssh_packet_userauth_success`` had no
-  resolved edge — diagnosis recorded in the corpus run report.
+  candidate. Cross-TU complement
+  (`resolve_registered_callback_dispatch_edges`) joins indirect
+  edges with non-table callback registrations
+  (function_pointer_assignment, struct_initializer,
+  signal_handler, callback_argument) by canonicalised site /
+  suffix matching — covers the single-slot dispatch shape
+  (``slot->on_data(...)`` ↔ ``slot->on_data = on_data_handler``).
+  A soft cap on the suffix-broad-match candidate count keeps
+  over-emit bounded. Project-agnostic by construction (only AST
+  cursor kinds + already-extracted callback_registration rows;
+  no symbol or naming heuristic). Closes the libssh
+  CVE-2018-10933 P3b gap where ``ssh_packet_process →
+  ssh_packet_userauth_success`` had no resolved edge — diagnosis
+  recorded in the corpus run report.
+- **Universal-if guards.** `src/check_me/step1/guards.py` now
+  emits every project-local IfStmt as a guard. Terminating
+  branches (return / goto / break / continue) carry the
+  ``enforcement_line`` field; non-terminating gates are emitted
+  without it, capturing the predicate the LLM still needs even
+  when the then-branch falls through. Schema-compatible (the
+  field is already nullable).
 - Regex baseline (`src/check_me/step1/regex_baseline.py`) +
   `regex-compare` CLI subcommand for the architectural-decision
   metric.
@@ -806,6 +822,39 @@ This appendix tracks the implemented portion of the 4-step pipeline. Updated as 
   retry passes (default 2, 5s cooldown — was 60s when pacing
   under public-cloud quotas) so a single LLM hiccup doesn't
   kill the run. Verifier `max_workers=4` matches miner posture.
+- **Multi-tier verifier fallback** in
+  `src/check_me/step2/runner.py`. Three branches added on top
+  of the synthetic-quarantine fallback:
+  (a) for callback / event / boot_phase candidates the first
+  call uses ``include_global_trust_boundaries=True`` and a
+  hop=2 source posture; if the verdict is ``quarantined``,
+  the runner retries once with ``hop_depth=3`` and emits
+  ``fallback=dispatch_context`` in the audit log;
+  (b) on input-budget / context-length errors the source
+  excerpts shrink to ``max_functions=1, max_chars=8000`` and
+  retry, recording ``fallback=source_cap``;
+  (c) a second overflow narrows further to a hop=1 slice +
+  candidate-only source and records
+  ``fallback=hop1_source_cap``.
+  All three are project-agnostic (matchers live in helper
+  functions that read substrate fields and exception strings
+  the SDK / providers expose). Verifier prompt also gains a
+  callback / event handler clause that recognises attacker-
+  conditioned mutable session / connection / heap state as a
+  valid form of attacker-controllability when explicit byte
+  parameters are absent — necessary when the substrate's
+  ingress site is a hop or two upstream of the handler the
+  verifier is critiquing.
+- **Richer synthetic candidate evidence** in
+  `synthetic_candidates_from_substrate`: callback handlers and
+  1-hop closure callees now carry up to six dedup'd
+  ``supporting_substrate_edges`` citations covering the
+  trigger_ref, the incoming call edges that dispatch into the
+  function, and the caller-side trust / callback rows that
+  pre-condition that dispatch. Closure callees inherit a
+  ``trigger_type=event`` when the upstream caller is a
+  ``network_socket`` boundary, ``callback`` when caller-side
+  callback registrations dominate.
 - Anchoring prevention: miner reasoning keys stripped before the
   verifier sees the candidate (`prompts.candidate_for_verifier`).
 - Verifier focused slice: 2-hop hybrid (call edges + shared global
@@ -859,6 +908,11 @@ Step 3 (`src/check_me/step3/`):
   failure mode where ``tcp_request:1700`` was selected as sink
   instead of walking the deeper ``answer_request →
   add_resource_record`` chain.
+- **libclang warm-up** in the runner so the per-IR
+  parallel synthesis workers don't race to materialise the
+  libclang index. Single ``extract_excerpts(source_root, [])``
+  call before the per-IR loop; failure is non-fatal (each call
+  has its own try/except).
 - Tests: 19 step3 test cases.
 
 Step 4 (`src/check_me/step4/`):

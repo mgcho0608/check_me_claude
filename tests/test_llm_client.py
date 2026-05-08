@@ -1,7 +1,8 @@
 """Pytest for check_me.llm.client — wraps the OpenAI SDK.
 
-These tests mock the SDK's ``chat.completions.create`` method so we
-exercise the wrapper's request shape and response flattening without
+These tests mock the SDK's ``chat.completions.create`` and
+``responses.create`` methods so we exercise the wrapper's request
+shape and response flattening for both wire formats without
 touching the network.
 """
 
@@ -48,9 +49,12 @@ class _Capturing:
 
 
 def _client_with(create_obj):
-    """Wrap a stand-in into the SDK shape ``client.chat.completions.create``."""
+    """Wrap a stand-in into the SDK shape ``client.chat.completions
+    .create`` and also expose ``client.responses.create`` so tests
+    can target either wire format with the same fixture builder."""
     return SimpleNamespace(
         chat=SimpleNamespace(completions=create_obj),
+        responses=create_obj,
     )
 
 
@@ -192,3 +196,162 @@ def test_chat_response_raw_dict_preserved():
     resp = chat(_client_with(cap), _cfg(), ChatRequest(messages=[]))
     assert resp.raw["id"] == "test-id"
     assert resp.raw["model"] == "m1"
+
+
+# --------------------------------------------------------------------------- #
+# Responses API + GPT-5 / Codex routing
+# --------------------------------------------------------------------------- #
+
+
+def _responses_ok_response(text="hi", status="completed", usage=None):
+    """Canonical Responses-API completion shape.
+
+    Mirrors the live SDK's ``output[].content[]`` structure with one
+    ``output_text`` chunk; ``usage`` uses the Responses-API field
+    names (``input_tokens`` / ``output_tokens``)."""
+    return {
+        "id": "resp-test-id",
+        "model": "codex-test",
+        "status": status,
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": text}],
+            }
+        ],
+        "usage": usage
+        or {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+    }
+
+
+def test_codex_model_auto_routes_to_responses_api():
+    """``api_mode=auto`` picks Responses for Codex-family models —
+    the call lands on ``client.responses.create`` and uses Responses
+    field names (``input``, ``max_output_tokens``)."""
+    cap = _Capturing(_responses_ok_response("ok"))
+    cfg = _cfg(model="codex-mini", max_tokens=2048)
+    chat(_client_with(cap), cfg, ChatRequest(messages=[{"role": "user", "content": "x"}]))
+    assert cap.kwargs is not None
+    assert cap.kwargs["model"] == "codex-mini"
+    # Responses uses ``input`` / ``max_output_tokens``.
+    assert cap.kwargs["input"] == [{"role": "user", "content": "x"}]
+    assert cap.kwargs["max_output_tokens"] == 2048
+    # Reasoning-family models drop the temperature field.
+    assert "temperature" not in cap.kwargs
+    # Chat-Completions field names are NOT present.
+    assert "messages" not in cap.kwargs
+    assert "max_tokens" not in cap.kwargs
+
+
+def test_responses_api_json_format_uses_text_format_field():
+    """Responses replaces ``response_format`` with ``text``: when
+    ``json_object=True`` the wrapper emits ``text={"format": ...}``
+    so the Responses endpoint accepts the JSON-mode signal."""
+    cap = _Capturing(_responses_ok_response('{"ok":true}'))
+    cfg = _cfg(model="codex-mini")
+    chat(
+        _client_with(cap),
+        cfg,
+        ChatRequest(messages=[], json_object=True),
+    )
+    assert cap.kwargs["text"] == {"format": {"type": "json_object"}}
+    assert "response_format" not in cap.kwargs
+
+
+def test_responses_api_extra_max_tokens_is_remapped():
+    """``json_call`` bumps ``max_tokens`` via ``extra`` on length
+    retries. For a Responses call the wrapper translates that into
+    ``max_output_tokens`` so the SDK accepts the bump."""
+    cap = _Capturing(_responses_ok_response("ok"))
+    cfg = _cfg(model="codex-mini", max_tokens=2048)
+    req = ChatRequest(messages=[], extra={"max_tokens": 8192})
+    chat(_client_with(cap), cfg, req)
+    assert cap.kwargs["max_output_tokens"] == 8192
+    assert "max_tokens" not in cap.kwargs
+
+
+def test_responses_api_incomplete_reason_surfaces_as_finish_reason():
+    """Responses' truncation signal is
+    ``incomplete_details.reason``; the wrapper exposes it through
+    ``ChatResponse.finish_reason`` so ``json_call`` length retries
+    keep working unchanged."""
+    cap = _Capturing(
+        {
+            "id": "resp-x",
+            "model": "codex-mini",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": ""}],
+                }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 0,
+                "total_tokens": 10,
+            },
+        }
+    )
+    resp = chat(
+        _client_with(cap),
+        _cfg(model="codex-mini"),
+        ChatRequest(messages=[]),
+    )
+    assert resp.finish_reason == "max_output_tokens"
+    # Usage maps onto Chat-Completions field names.
+    assert resp.prompt_tokens == 10
+    assert resp.completion_tokens == 0
+
+
+def test_api_mode_chat_completions_overrides_codex_auto_route():
+    """Forcing ``api_mode="chat_completions"`` keeps Codex models on
+    the Chat Completions endpoint — operator escape hatch when the
+    auto-detect mis-routes."""
+    cap = _Capturing(_ok_response("ok"))
+    cfg = _cfg(model="codex-mini", api_mode="chat_completions")
+    chat(_client_with(cap), cfg, ChatRequest(messages=[]))
+    # Chat-Completions field names present, Responses ones absent.
+    assert "messages" in cap.kwargs
+    assert "input" not in cap.kwargs
+    assert "max_output_tokens" not in cap.kwargs
+
+
+def test_gpt5_chat_completions_uses_max_completion_tokens_and_drops_temperature():
+    """OpenAI's reasoning-tier Chat-Completions endpoint expects
+    ``max_completion_tokens`` and rejects an explicit
+    ``temperature``. The wrapper applies both rules client-side."""
+    cap = _Capturing(_ok_response("ok"))
+    cfg = _cfg(model="gpt-5-mini", temperature=0.3, max_tokens=2048)
+    chat(_client_with(cap), cfg, ChatRequest(messages=[]))
+    assert cap.kwargs["max_completion_tokens"] == 2048
+    assert "max_tokens" not in cap.kwargs
+    assert "temperature" not in cap.kwargs
+
+
+def test_gpt5_extra_max_tokens_remaps_to_max_completion_tokens():
+    """``json_call``'s ``extra={"max_tokens": ...}`` bump must reach
+    the GPT-5 endpoint as ``max_completion_tokens``."""
+    cap = _Capturing(_ok_response("ok"))
+    cfg = _cfg(model="gpt-5-mini", max_tokens=2048)
+    req = ChatRequest(messages=[], extra={"max_tokens": 8192})
+    chat(_client_with(cap), cfg, req)
+    assert cap.kwargs["max_completion_tokens"] == 8192
+
+
+def test_responses_api_reasoning_effort_extra_is_remapped():
+    """Reasoning effort travels as ``reasoning_effort`` in Chat
+    Completions; Responses expects it as ``reasoning={"effort":
+    ...}``. The wrapper translates the same call-site shape so
+    callers stay format-agnostic."""
+    cap = _Capturing(_responses_ok_response("ok"))
+    cfg = _cfg(model="codex-mini")
+    req = ChatRequest(
+        messages=[],
+        extra={"reasoning_effort": "medium"},
+    )
+    chat(_client_with(cap), cfg, req)
+    assert cap.kwargs["reasoning"] == {"effort": "medium"}
+    # Chat-Completions vocabulary should not leak into the kwargs.
+    assert "reasoning_effort" not in cap.kwargs

@@ -1,14 +1,19 @@
 """Guard / enforcement-relation extraction.
 
-A *guard* in the substrate is a control-flow construct whose taken
-branch decides which code path runs based on a predicate or value.
-The substrate captures two structurally distinct shapes:
+A *guard* in the substrate is any control-flow construct whose
+taken branch decides which code path runs based on a predicate or
+value. The substrate captures two structurally distinct shapes:
 
-A) ``if`` (or equivalent) whose taken branch terminates the current
-   execution path — by ``return``, by ``goto`` to an explicit error
-   / cleanup label, or by ``break`` / ``continue`` out of an
-   enclosing loop. The condition gates fall-through code against
-   the predicate.
+A) ``if`` — every project-local IfStmt is recorded as a guard. The
+   ``enforcement_line`` field is filled when the taken branch
+   terminates the current execution path (``return``, ``goto``,
+   ``break``, ``continue``, or a compound block whose last
+   meaningful statement is one of those); otherwise it is left
+   unset. Recording non-terminating ifs as guards-without-
+   enforcement keeps downstream reasoning (Step 2 verifier, Step 3
+   IR synthesis) honest about the gating predicate even when the
+   then-branch falls through. The taken-branch terminator forms
+   that DO carry an enforcement_line are:
 
    1. ``if (cond) return ...;``
    2. ``if (cond) goto label;``
@@ -145,9 +150,13 @@ def _walk_if_stmts(
             continue
         cond, then_branch = kids[0], kids[1]
         is_term, enf = _is_terminating_branch(then_branch)
-        if not is_term:
-            continue
         cond_text = written_form(cond) or "<unknown>"
+        # Every project-local IfStmt is emitted; non-terminating
+        # then-branches simply leave ``enforcement_line`` unset.
+        # Schema's nullable enforcement_line already supports this
+        # — see substrate.v1.json. The downstream consumer can
+        # distinguish "this gate rejects" from "this gate decides
+        # which path is taken next" via the field's presence.
         out.append(
             GuardEntry(
                 function=fn_name,
@@ -155,7 +164,7 @@ def _walk_if_stmts(
                 guard_call=cond_text,
                 guard_line=loc.line,
                 result_used=True,
-                enforcement_line=enf,
+                enforcement_line=enf if is_term else None,
             )
         )
     return out

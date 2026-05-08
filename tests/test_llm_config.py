@@ -147,6 +147,32 @@ def test_max_tokens_unparsable_raises(monkeypatch):
         load_config()
 
 
+def test_api_mode_default_is_auto(monkeypatch):
+    """Default ``api_mode`` is ``"auto"`` so existing deployments (no
+    new env var set) keep their old wire-format behaviour."""
+    _set_minimum(monkeypatch)
+    cfg = load_config()
+    assert cfg.api_mode == "auto"
+
+
+def test_api_mode_override_via_env(monkeypatch):
+    """``CHECK_ME_LLM_API_MODE`` propagates to ``cfg.api_mode``."""
+    _set_minimum(monkeypatch)
+    monkeypatch.setenv("CHECK_ME_LLM_API_MODE", "responses")
+    cfg = load_config()
+    assert cfg.api_mode == "responses"
+
+
+def test_invalid_api_mode_rejected(monkeypatch):
+    """Any value outside the three allowed modes raises ConfigError
+    — typo'd values must surface at config time, not silently
+    fall through to a wire-format mismatch at call time."""
+    _set_minimum(monkeypatch)
+    monkeypatch.setenv("CHECK_ME_LLM_API_MODE", "codex")
+    with pytest.raises(ConfigError, match="API_MODE"):
+        load_config()
+
+
 # --------------------------------------------------------------------------- #
 # Per-step overrides
 # --------------------------------------------------------------------------- #

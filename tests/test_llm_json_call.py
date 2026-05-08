@@ -143,6 +143,30 @@ def test_length_retry_does_not_append_followups():
     assert len(seq.calls[1]["messages"]) == 2
 
 
+def test_max_output_tokens_finish_is_treated_as_truncation():
+    """Responses-API surfaces truncation as
+    ``finish_reason="max_output_tokens"`` (mapped from
+    ``incomplete_details.reason``). ``json_call`` must treat it the
+    same as Chat-Completions ``"length"`` and trigger the max-tokens
+    doubling retry — otherwise Responses-API runs would never
+    self-recover from a too-tight budget."""
+    seq = _SequencedChat(
+        [
+            _resp("", finish="max_output_tokens"),
+            _resp('{"recovered": 1}'),
+        ]
+    )
+    result = chat_json(
+        client=None, config=_cfg(max_tokens=2048),
+        system="s", user="u",
+        chat_fn=seq, max_retries=2,
+    )
+    assert result.parsed == {"recovered": 1}
+    # First attempt at 2048, second at 4096 (doubled by length retry).
+    assert seq.calls[0]["max_tokens"] == 2048
+    assert seq.calls[1]["max_tokens"] == 4096
+
+
 # --------------------------------------------------------------------------- #
 # JSON-parse retry
 # --------------------------------------------------------------------------- #

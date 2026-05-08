@@ -291,3 +291,196 @@ def extract_dispatch_resolution_edges(
                     )
                 )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Cross-TU resolution from non-table callback registrations
+# --------------------------------------------------------------------------- #
+#
+# The function-table dispatch above covers the ``arr[i](...)`` /
+# ``obj->field[i](...)`` shape. C also has the **single-slot
+# dispatch** shape: ``slot->on_data(buf, len)`` where ``on_data`` is
+# a function-pointer field set by ``slot->on_data = on_data_handler``
+# at registration time. The substrate already records the
+# registration via ``callback_registrations`` (kinds
+# ``function_pointer_assignment`` / ``struct_initializer`` /
+# ``signal_handler`` / ``callback_argument``); we additionally
+# resolve the indirect call site to the registered handler so
+# downstream layers can chain past the dispatch.
+#
+# The match runs **after** ``call_graph.merge_edges`` over the
+# project-global edge set so it works cross-TU (a registration in
+# init.c and a dispatch in worker.c both resolve).
+#
+# Project-agnostic: the matcher is text-based on the substrate's
+# already-canonicalised ``registration_site`` / written-form callee
+# strings, with no symbol-name or naming-convention heuristics.
+
+
+def _normalize_site_text(text: str) -> str:
+    """Canonicalise a written-form expression for callback-site
+    matching.
+
+    Operations applied (idempotent):
+
+    1. Whitespace collapsed.
+    2. ``(* foo)`` → ``foo`` (the C function-pointer-deref form
+       sometimes emitted by libclang's written-form for member
+       references in indirect calls).
+    3. Leading ``*`` (a single deref operator on the lvalue, also
+       sometimes emitted) is stripped.
+
+    No symbol-name or project-convention rule is applied; the
+    purpose is only to make ``slot->on_data`` and ``(*slot->on_data)``
+    compare equal, which is structural.
+    """
+    if not text:
+        return ""
+    stripped = "".join(text.split())
+    # ``(*x)`` → ``*x`` → ``x``.  Outer parens around a single
+    # deref are common in the AST printer for member-via-fn-ptr
+    # calls; drop them.
+    while stripped.startswith("(") and stripped.endswith(")"):
+        inner = stripped[1:-1]
+        if inner and not _has_unbalanced_parens(inner):
+            stripped = inner
+            continue
+        break
+    # ``(*x)`` may have already lost its outer parens above; if a
+    # leading ``*`` remains it's the deref operator — drop it.
+    while stripped.startswith("*"):
+        stripped = stripped[1:]
+    return stripped
+
+
+def _has_unbalanced_parens(text: str) -> bool:
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return True
+    return depth != 0
+
+
+def _site_suffix(text: str) -> str:
+    """Return the trailing field name of a site expression for
+    suffix-match fallback.
+
+    ``slot->callbacks.on_data`` → ``on_data``;
+    ``ctx->slot.on_data`` → ``on_data``;
+    ``on_data`` → ``on_data``. The split is purely textual on
+    ``->`` / ``.`` separators applied to the canonicalised form
+    from ``_normalize_site_text``."""
+    norm = _normalize_site_text(text)
+    if not norm:
+        return ""
+    for sep in ("->", "."):
+        if sep in norm:
+            norm = norm.rsplit(sep, 1)[1]
+    return norm
+
+
+# Cap for suffix-only broad-match candidate count. When the suffix
+# name (e.g. ``on_data``) is registered against more than a small
+# number of distinct sites, a single indirect dispatch can no
+# longer be plausibly attributed to all of them — the broad match
+# would over-emit and flood the verifier with weak candidates.
+# Above the cap we fall back to "no broad match" rather than
+# emit a long list of low-confidence resolutions. The number is
+# a soft ceiling (lossless propagation still applies under it);
+# it is not a tuning to any specific corpus, and changing it does
+# not change behaviour on small fan-outs that are the realistic
+# single-slot dispatch case.
+_SUFFIX_BROAD_MATCH_MAX_CANDIDATES = 8
+
+
+def resolve_registered_callback_dispatch_edges(
+    edges: Iterable[CallEdge],
+    callback_regs: Iterable[CallbackReg],
+) -> list[CallEdge]:
+    """Resolve indirect call edges to registered handler functions
+    via non-table callback registrations.
+
+    Inputs are assumed merged across the whole project — the
+    matcher works cross-TU. ``function_table`` registrations are
+    deliberately skipped here (they are handled by
+    :func:`extract_dispatch_resolution_edges` per TU); everything
+    else is candidate registration material.
+
+    Match strategy:
+
+    1. **Exact site match.** Group the non-table registrations by
+       the canonicalised registration site
+       (``_normalize_site_text``). For each indirect ``CallEdge``
+       whose canonicalised callee equals one of the site keys,
+       emit one resolved edge per registered handler at that
+       site.
+    2. **Suffix broad match.** When no exact match exists, fall
+       back to matching on the trailing field name
+       (``_site_suffix``). The broad match is gated on candidate
+       count ≤ ``_SUFFIX_BROAD_MATCH_MAX_CANDIDATES`` to avoid
+       over-emit when the same field name is registered at many
+       unrelated sites.
+    """
+    cb_list = [r for r in callback_regs if r.kind != "function_table"]
+    if not cb_list:
+        return []
+
+    by_exact: dict[str, list[CallbackReg]] = defaultdict(list)
+    by_suffix: dict[str, list[CallbackReg]] = defaultdict(list)
+    for r in cb_list:
+        site_norm = _normalize_site_text(r.registration_site)
+        if site_norm:
+            by_exact[site_norm].append(r)
+            suffix = _site_suffix(site_norm)
+            if suffix and suffix != site_norm:
+                by_suffix[suffix].append(r)
+
+    out: list[CallEdge] = []
+    seen: set[tuple] = set()
+    for e in edges:
+        if e.kind != "indirect":
+            continue
+        callee_norm = _normalize_site_text(e.callee)
+        if not callee_norm:
+            continue
+        candidates = by_exact.get(callee_norm)
+        match_kind = "callback site"
+        if not candidates:
+            suffix = _site_suffix(callee_norm)
+            if suffix and suffix != callee_norm:
+                fallback = by_suffix.get(suffix, [])
+                if 0 < len(fallback) <= _SUFFIX_BROAD_MATCH_MAX_CANDIDATES:
+                    candidates = fallback
+                    match_kind = (
+                        f"callback suffix {suffix!r} (broad match, "
+                        f"{len(fallback)} candidates)"
+                    )
+        if not candidates:
+            continue
+        for r in candidates:
+            key = (
+                e.caller,
+                r.callback_function,
+                e.file,
+                e.line,
+                "indirect",
+                match_kind,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                CallEdge(
+                    caller=e.caller,
+                    callee=r.callback_function,
+                    file=e.file,
+                    line=e.line,
+                    kind="indirect",
+                    note=f"dispatch resolved via {match_kind}",
+                )
+            )
+    return out

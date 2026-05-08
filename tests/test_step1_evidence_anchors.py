@@ -104,7 +104,9 @@ def test_function_like_macro_skipped(tmp_path):
 
 
 def test_alias_macro_emits_structural_artifact(tmp_path):
-    """Mirrors contiki-ng's ``UIP_TCP_BUF`` alias macro at uip.h:81."""
+    """Mirrors a packet-header alias macro pattern (``HEADER_PTR``-style
+    cast over a fixed offset of a global byte buffer) common in
+    embedded protocol stacks."""
     rows = _anchors(
         tmp_path,
         {
@@ -122,8 +124,9 @@ def test_alias_macro_emits_structural_artifact(tmp_path):
 
 
 def test_global_variable_emits_structural_artifact(tmp_path):
-    """Mirrors contiki-ng's ``uint16_t uip_len, uip_slen;`` global
-    at uip6.c:159 — a top-level VAR_DECL is a structural anchor."""
+    """Mirrors a global packet-length declaration — a top-level
+    ``VAR_DECL`` (e.g. a shared length field of a static buffer) is
+    a structural anchor."""
     rows = _anchors(
         tmp_path,
         {"f.c": "unsigned short uip_len;\nint main(void){return uip_len;}\n"},

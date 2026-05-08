@@ -64,6 +64,13 @@ class Config:
     The fields are deliberately flat — the OpenAI SDK takes them as
     kwargs and any provider that speaks Chat Completions accepts the
     same shape.
+
+    ``api_mode`` selects the wire format:
+      - ``"auto"`` (default) — pick by model name. Codex / GPT-5
+        family routes to Responses API; everything else to Chat
+        Completions.
+      - ``"chat_completions"`` — force Chat Completions.
+      - ``"responses"`` — force Responses API.
     """
 
     url: str
@@ -73,6 +80,7 @@ class Config:
     max_tokens: int
     timeout_sec: float = 1800.0
     max_retries: int = 1
+    api_mode: Literal["auto", "chat_completions", "responses"] = "auto"
 
     def redacted(self) -> dict:
         """Return a dict safe to log: key replaced with a marker."""
@@ -84,6 +92,7 @@ class Config:
             "max_tokens": self.max_tokens,
             "timeout_sec": self.timeout_sec,
             "max_retries": self.max_retries,
+            "api_mode": self.api_mode,
         }
 
 
@@ -108,6 +117,7 @@ _ENV_VAR_DEFAULT = {
     "max_tokens": "CHECK_ME_LLM_MAX_TOKENS",
     "timeout_sec": "CHECK_ME_LLM_TIMEOUT_SEC",
     "max_retries": "CHECK_ME_LLM_MAX_RETRIES",
+    "api_mode": "CHECK_ME_LLM_API_MODE",
 }
 
 _BUILTIN_DEFAULTS = {
@@ -127,6 +137,11 @@ _BUILTIN_DEFAULTS = {
     # bounded at 2 * timeout_sec = 1 hour — still bounded, but with
     # fewer redundant retry attempts after a long real-time-out.
     "max_retries": "1",
+    # Wire-format selector. ``auto`` picks Responses API for OpenAI
+    # Codex / GPT-5 family by model name, Chat Completions for
+    # everything else. Override via ``CHECK_ME_LLM_API_MODE`` when
+    # auto-detect mis-routes for a self-hosted endpoint.
+    "api_mode": "auto",
 }
 
 
@@ -187,6 +202,7 @@ def load_config(
     max_tokens: int | None = None,
     timeout_sec: float | None = None,
     max_retries: int | None = None,
+    api_mode: Literal["auto", "chat_completions", "responses"] | None = None,
 ) -> Config:
     """Resolve a ``Config`` from env vars + ``.env`` + explicit kwargs.
 
@@ -203,6 +219,7 @@ def load_config(
         "max_tokens": max_tokens,
         "timeout_sec": timeout_sec,
         "max_retries": max_retries,
+        "api_mode": api_mode,
     }
 
     resolved_url = _resolve("url", step, overrides)
@@ -270,6 +287,13 @@ def load_config(
             f"CHECK_ME_LLM_MAX_RETRIES={resolved_retries} must be >= 0."
         )
 
+    raw_api_mode = _resolve("api_mode", step, overrides)
+    if raw_api_mode not in ("auto", "chat_completions", "responses"):
+        raise ConfigError(
+            f"CHECK_ME_LLM_API_MODE={raw_api_mode!r} must be one of"
+            " 'auto', 'chat_completions', 'responses'."
+        )
+
     return Config(
         url=resolved_url.rstrip("/"),
         key=resolved_key,
@@ -278,4 +302,5 @@ def load_config(
         max_tokens=resolved_max,
         timeout_sec=resolved_timeout,
         max_retries=resolved_retries,
+        api_mode=raw_api_mode,  # type: ignore[arg-type]
     )

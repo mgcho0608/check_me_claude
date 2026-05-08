@@ -190,3 +190,53 @@ def test_function_pointer_variable_call_not_resolved(tmp_path):
     assert not any(
         e["caller"] == "run" and e["callee"] == "alpha" for e in resolved
     )
+
+
+# ---------- Single-slot dispatch via non-table callback regs ----------
+
+
+def test_function_pointer_assignment_dispatch_resolves_registered_handler(
+    tmp_path,
+):
+    """``slot->on_data(7)`` (single function-pointer field call) is
+    resolved to the handler registered via
+    ``slot->on_data = on_data_handler`` — exercising
+    :func:`resolve_registered_callback_dispatch_edges`'s exact-site
+    match for non-table callback registrations."""
+    edges = _edges(
+        tmp_path,
+        """
+        typedef int (*op_t)(int);
+        struct slot {
+            op_t on_data;
+        };
+
+        int on_data_handler(int x){return x+1;}
+
+        void install(struct slot *s){
+            s->on_data = on_data_handler;
+        }
+
+        int dispatch(struct slot *slot){
+            return slot->on_data(7);
+        }
+        """,
+    )
+    resolved = _resolved(edges)
+    pairs = {(e["caller"], e["callee"]) for e in resolved}
+    assert ("dispatch", "on_data_handler") in pairs
+    # The note records the matching strategy honestly — either an
+    # exact site match (when the dispatch's lvalue spelling matches
+    # the registration's, e.g. both ``s->on_data``) or a suffix
+    # broad match (when the lvalues differ in their base, e.g.
+    # ``s->on_data`` vs ``slot->on_data``, but share the trailing
+    # field name ``on_data``).
+    matches = [
+        e for e in resolved
+        if e["caller"] == "dispatch" and e["callee"] == "on_data_handler"
+    ]
+    assert matches, "no resolved edge from dispatch to on_data_handler"
+    assert any(
+        "callback site" in e["note"] or "callback suffix" in e["note"]
+        for e in matches
+    )

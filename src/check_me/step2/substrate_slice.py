@@ -446,6 +446,28 @@ def _function_def_file_map(cats: dict[str, Any]) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 
 
+_SUPPORTING_EDGE_CAP = 6
+"""Cap for the deterministic ``supporting_substrate_edges`` list.
+Each candidate's evidence list is the verifier's primary citation
+surface; six rows is enough to cover the (trigger_ref + a couple
+of incoming call edges + caller-side trust/callback refs) without
+turning the verifier prompt into a wall of citations. Number is a
+soft ceiling — order is preserved for the first ``N``."""
+
+
+def _edge_citation(r: dict[str, Any]) -> str:
+    """Render a ``call_graph`` row as a short citation string the
+    verifier can read back. Field order is fixed for stable diffs."""
+    return (
+        "call_graph["
+        f"caller={r.get('caller')!r}, "
+        f"callee={r.get('callee')!r}, "
+        f"file={r.get('file')!r}, "
+        f"line={r.get('line')!r}, "
+        f"kind={r.get('kind')!r}]"
+    )
+
+
 def synthetic_candidates_from_substrate(
     substrate: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -467,8 +489,11 @@ def synthetic_candidates_from_substrate(
         substrate row's category / kind);
       - ``trigger_ref`` (a short citation of the originating
         substrate row);
-      - ``supporting_substrate_edges`` (a single citation
-        identical to ``trigger_ref``);
+      - ``supporting_substrate_edges`` (deterministic citations
+        the verifier should consult — at minimum the trigger_ref
+        itself; for callback handlers and 1-hop closure callees
+        also the incoming call_graph edges and the caller-side
+        trust / callback refs that connect them to ingress);
       - ``id`` is NOT assigned — the runner re-numbers globally
         after merging with miner-discovered candidates.
 
@@ -485,8 +510,51 @@ def synthetic_candidates_from_substrate(
     cats = substrate.get("categories", {}) or {}
     body_file_map = _function_def_file_map(cats)
 
+    call_edges: list[dict[str, Any]] = list(cats.get("call_graph", []))
+    trust_rows: list[dict[str, Any]] = list(cats.get("trust_boundaries", []))
+    callback_rows: list[dict[str, Any]] = list(cats.get("callback_registrations", []))
+
+    # Pre-index references by function name so 1b / 1c can attach
+    # caller-side substrate evidence to the candidate's supporting
+    # edges without rewalking the lists each time.
+    trust_refs_by_fn: dict[str, list[str]] = {}
+    trust_kind_by_fn: dict[str, str] = {}
+    for r in trust_rows:
+        fn = r.get("function")
+        if not isinstance(fn, str) or not fn:
+            continue
+        kind = r.get("kind", "unknown")
+        trust_refs_by_fn.setdefault(fn, []).append(
+            f"trust_boundaries[function={fn}, kind={kind}]"
+        )
+        # First-seen kind wins; the verifier just needs a hint.
+        trust_kind_by_fn.setdefault(fn, kind)
+
+    callback_refs_by_fn: dict[str, list[str]] = {}
+    for r in callback_rows:
+        kind = r.get("kind", "unknown")
+        cbf = r.get("callback_function")
+        if isinstance(cbf, str) and cbf:
+            callback_refs_by_fn.setdefault(cbf, []).append(
+                f"callback_registrations[callback_function={cbf}, kind={kind}]"
+            )
+        fn = r.get("function")
+        if isinstance(fn, str) and fn:
+            callback_refs_by_fn.setdefault(fn, []).append(
+                f"callback_registrations[function={fn}, kind={kind}]"
+            )
+
+    incoming_edges_by_callee: dict[str, list[dict[str, Any]]] = {}
+    for e in call_edges:
+        callee = e.get("callee")
+        if isinstance(callee, str) and callee:
+            incoming_edges_by_callee.setdefault(callee, []).append(e)
+
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+
+    def _dedup_cap(items: list[str]) -> list[str]:
+        return list(dict.fromkeys(items))[:_SUPPORTING_EDGE_CAP]
 
     def _add(
         fn: object,
@@ -494,6 +562,7 @@ def synthetic_candidates_from_substrate(
         line: object,
         trigger_type: str,
         trigger_ref: str,
+        supporting_edges: list[str] | None = None,
     ) -> None:
         if not isinstance(fn, str) or not fn or fn in seen:
             return
@@ -503,17 +572,21 @@ def synthetic_candidates_from_substrate(
         # case), or when no file was supplied (closure / root).
         if not isinstance(file, str) or not file:
             file = body_file_map.get(fn, "")
+        if supporting_edges is None:
+            supporting = [trigger_ref]
+        else:
+            supporting = _dedup_cap([trigger_ref] + supporting_edges)
         out.append({
             "function": fn,
             "file": file,
             "line": line if isinstance(line, int) else None,
             "trigger_type": trigger_type,
             "trigger_ref": trigger_ref,
-            "supporting_substrate_edges": [trigger_ref],
+            "supporting_substrate_edges": supporting,
         })
 
     # 1a. trust_boundaries — explicit attacker-input markers.
-    for r in cats.get("trust_boundaries", []):
+    for r in trust_rows:
         fn = r.get("function")
         kind = r.get("kind", "unknown")
         # network_socket -> event; everything else stays unknown so
@@ -528,15 +601,26 @@ def synthetic_candidates_from_substrate(
     # 1b. callback_registrations — both the handler (callback_function)
     #     and the registration-site function. row.file pins the
     #     registration site, NOT the handler's body, so we resolve
-    #     the handler's file via body_file_map.
-    for r in cats.get("callback_registrations", []):
+    #     the handler's file via body_file_map. For handlers we
+    #     attach incoming-edge citations (so the verifier can see
+    #     who dispatches into the handler) plus any caller-side
+    #     trust / callback refs that pre-condition that dispatch.
+    for r in callback_rows:
         kind = r.get("kind", "unknown")
         cbf = r.get("callback_function")
         if isinstance(cbf, str) and cbf:
+            extras: list[str] = []
+            for inc in incoming_edges_by_callee.get(cbf, []):
+                caller = inc.get("caller")
+                if isinstance(caller, str) and caller:
+                    extras.extend(trust_refs_by_fn.get(caller, []))
+                    extras.extend(callback_refs_by_fn.get(caller, []))
+                extras.append(_edge_citation(inc))
             _add(
                 cbf, body_file_map.get(cbf), None,
                 "callback",
                 f"callback_registrations[callback_function={cbf}, kind={kind}]",
+                supporting_edges=extras,
             )
         regfn = r.get("function")
         if isinstance(regfn, str) and regfn:
@@ -548,23 +632,23 @@ def synthetic_candidates_from_substrate(
 
     # 1c + 1d. anchor 1-hop closure + call-graph roots.
     anchor: set[str] = set()
-    for r in cats.get("trust_boundaries", []):
+    for r in trust_rows:
         fn = r.get("function")
         if isinstance(fn, str) and fn:
             anchor.add(fn)
-    for r in cats.get("callback_registrations", []):
+    for r in callback_rows:
         for f in (r.get("callback_function"), r.get("function")):
             if isinstance(f, str) and f:
                 anchor.add(f)
 
     closure_callees: set[str] = set()
-    for r in cats.get("call_graph", []):
+    for r in call_edges:
         if r.get("caller") in anchor and isinstance(r.get("callee"), str):
             closure_callees.add(r["callee"])
 
     callers_set: set[str] = set()
     callees_set: set[str] = set()
-    for r in cats.get("call_graph", []):
+    for r in call_edges:
         c = r.get("caller")
         ce = r.get("callee")
         if isinstance(c, str) and c:
@@ -574,10 +658,37 @@ def synthetic_candidates_from_substrate(
     roots = callers_set - callees_set
 
     for fn in sorted(closure_callees - anchor):
+        # Compose supporting edges from the anchor incoming edges
+        # plus the caller-side trust / callback evidence that turned
+        # the caller into an anchor in the first place. Pick the
+        # trigger_type by the strongest caller signal: a network
+        # trust boundary makes this an ``event``-style entry; a
+        # callback registration makes it a ``callback``-style entry;
+        # otherwise leave it ``unknown`` and let the verifier's
+        # source-aware critique decide.
+        extras = []
+        ttype = "unknown"
+        for inc in incoming_edges_by_callee.get(fn, []):
+            caller = inc.get("caller")
+            if not isinstance(caller, str) or caller not in anchor:
+                continue
+            caller_trust = trust_refs_by_fn.get(caller, [])
+            caller_cb = callback_refs_by_fn.get(caller, [])
+            extras.extend(caller_trust)
+            extras.extend(caller_cb)
+            extras.append(_edge_citation(inc))
+            if (
+                ttype == "unknown"
+                and trust_kind_by_fn.get(caller) == "network_socket"
+            ):
+                ttype = "event"
+            elif ttype == "unknown" and caller_cb:
+                ttype = "callback"
         _add(
             fn, None, None,
-            "unknown",
+            ttype,
             "call_graph[anchor 1-hop callee of trust_boundary or callback handler]",
+            supporting_edges=extras,
         )
     for fn in sorted(roots - anchor - closure_callees):
         _add(
@@ -670,6 +781,7 @@ def slice_for_candidate(
     candidate_function: str,
     candidate_file: str | None = None,
     hop_depth: int = 2,
+    include_global_trust_boundaries: bool = False,
 ) -> SubstrateSlice:
     """Return a candidate-focused projection of ``full`` for the
     verifier.
@@ -695,10 +807,18 @@ def slice_for_candidate(
 
     - trust_boundaries rows whose ``function`` is in the
       neighbourhood, plus other trust_boundaries in the candidate's
-      file as project-wide context.
+      file as project-wide context. Set
+      ``include_global_trust_boundaries=True`` to keep the FULL
+      project trust_boundaries instead — useful when a callback /
+      event handler's reachability claim leans on an ingress site
+      defined in an unrelated file (the runner uses this when a
+      candidate carries a callback / event trigger_type).
     - callback_registrations whose ``callback_function`` or
       ``function`` is in the neighbourhood, plus other rows in the
-      candidate's file.
+      candidate's file. ``callback_function`` is matched by name
+      alone (the row's ``file`` is the registration site, not the
+      handler body, so file-coupling would drop legitimate cross-
+      TU registrations).
     - call_graph edges where BOTH endpoints are in the
       neighbourhood (i.e. the induced subgraph; this prevents
       leaking 3-hop fragments through a single hop endpoint).
@@ -758,14 +878,37 @@ def slice_for_candidate(
             return file is None or file == candidate_file
         return name in neighborhood
 
-    trust = [
-        r for r in full.trust_boundaries
-        if _row_in_neighborhood(r.get("function"), r.get("file"))
-        or (r.get("function") != candidate_function and same_file(r.get("file")))
-    ]
+    if include_global_trust_boundaries:
+        # Wider posture used by the runner when the candidate is a
+        # callback / event handler whose ingress source-of-truth
+        # may sit in a file outside the candidate's neighbourhood.
+        # Keeping the full trust_boundary set lets the verifier
+        # cite the cross-file ingress without a second retrieval
+        # round.
+        trust = list(full.trust_boundaries)
+    else:
+        trust = [
+            r for r in full.trust_boundaries
+            if _row_in_neighborhood(r.get("function"), r.get("file"))
+            or (r.get("function") != candidate_function and same_file(r.get("file")))
+        ]
+
+    def _callback_handler_in_neighborhood(name: str | None) -> bool:
+        """Match a callback handler row by NAME alone, not file:
+        the row's ``file`` field pins the registration site, not
+        the handler body, so the seed-file disambiguation used by
+        ``_row_in_neighborhood`` would drop legitimate cross-TU
+        callback registrations (a registration in init.c for a
+        handler defined in worker.c)."""
+        if not isinstance(name, str):
+            return False
+        if name == candidate_function:
+            return True
+        return name in neighborhood
+
     callbacks = [
         r for r in full.callback_registrations
-        if _row_in_neighborhood(r.get("callback_function"), r.get("file"))
+        if _callback_handler_in_neighborhood(r.get("callback_function"))
         or _row_in_neighborhood(r.get("function"), r.get("file"))
         or (
             r.get("callback_function") != candidate_function

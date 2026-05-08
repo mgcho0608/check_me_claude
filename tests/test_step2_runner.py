@@ -465,6 +465,140 @@ def test_verifier_retry_passes_default_to_two():
     assert row["status"] == "kept", row
 
 
+class _BudgetOverflowChat:
+    """chat_fn that raises an input-budget error for the first N
+    verifier calls, then returns a canned response. Lets us drive
+    the runner's tier-1 source-cap fallback path without a real
+    provider."""
+
+    def __init__(
+        self,
+        miner_resp: ChatResponse,
+        verifier_resp: ChatResponse,
+        overflow_count: int,
+    ):
+        self.miner_resp = miner_resp
+        self.verifier_resp = verifier_resp
+        self.remaining = overflow_count
+        self.calls = []
+
+    def __call__(self, client, config, request: ChatRequest) -> ChatResponse:
+        self.calls.append({"client": client})
+        user_msg = request.messages[-1]["content"]
+        if "Known candidates" in user_msg:
+            return self.miner_resp
+        if self.remaining > 0:
+            self.remaining -= 1
+            raise RuntimeError(
+                "input tokens exceed the configured limit for this model"
+            )
+        return self.verifier_resp
+
+
+def test_verifier_input_budget_overflow_falls_back_to_smaller_source():
+    """When the LLM call raises with a context-length / input-tokens
+    message, the runner shrinks source excerpts and retries — the
+    candidate emerges with ``fallback=source_cap`` recorded in the
+    audit log instead of the synthetic-quarantine that would
+    happen without the recovery branch."""
+    chat = _BudgetOverflowChat(
+        miner_resp=_resp(_miner_response_one_kept_candidate()),
+        verifier_resp=_resp(_verifier_kept_response()),
+        overflow_count=1,
+    )
+    output, report = runner_mod.run(
+        _empty_substrate(),
+        miner_config=_cfg(), verifier_config=_cfg(),
+        miner_client="m", verifier_client="v",
+        verifier_retry_cooldown_sec=0,
+        chat_fn=chat,
+    )
+    row = output["entrypoints"][0]
+    assert row["status"] == "kept"
+    fallback_used = [
+        c for c in report.verifier_calls
+        if c.get("fallback") in ("source_cap", "hop1_source_cap")
+    ]
+    assert fallback_used, report.verifier_calls
+
+
+class _QuarantineThenKeepChat:
+    """chat_fn that returns ``quarantined`` on the first verifier
+    call and ``kept`` on the next — drives the runner's tier-3
+    quarantine-retry-with-richer-dispatch-context branch for
+    callback / event candidates."""
+
+    def __init__(self, miner_resp: ChatResponse,
+                 quar_resp: ChatResponse,
+                 keep_resp: ChatResponse):
+        self.miner_resp = miner_resp
+        self.quar_resp = quar_resp
+        self.keep_resp = keep_resp
+        self.verifier_call_idx = 0
+        self.calls = []
+
+    def __call__(self, client, config, request: ChatRequest) -> ChatResponse:
+        self.calls.append({"client": client})
+        user_msg = request.messages[-1]["content"]
+        if "Known candidates" in user_msg:
+            return self.miner_resp
+        self.verifier_call_idx += 1
+        if self.verifier_call_idx == 1:
+            return self.quar_resp
+        return self.keep_resp
+
+
+def test_quarantine_retry_expands_dispatch_context_for_callback_candidate():
+    """A callback-trigger candidate quarantined on the first pass
+    is retried with the wider dispatch-context slice; if the
+    second pass keeps it, the final verdict is ``kept`` and
+    ``fallback=dispatch_context`` is recorded."""
+    miner_payload = {
+        "candidates": [
+            {
+                "id": "EP-001",
+                "function": "entry",
+                "file": "f.c",
+                "line": 10,
+                "trigger_type": "callback",
+                "trigger_ref": (
+                    "callback_registrations[callback_function=entry,"
+                    " kind=function_pointer_assignment]"
+                ),
+                "reachability": "registered as a packet callback",
+                "attacker_controllability": (
+                    "callback dispatched on inbound packet"
+                ),
+                "supporting_substrate_edges": [
+                    "callback_registrations[callback_function=entry,"
+                    " kind=function_pointer_assignment]"
+                ],
+                "confidence": "medium",
+                "uncertainty": "",
+            }
+        ]
+    }
+    chat = _QuarantineThenKeepChat(
+        miner_resp=_resp(miner_payload),
+        quar_resp=_resp(_verifier_quarantine_response()),
+        keep_resp=_resp(_verifier_kept_response()),
+    )
+    output, report = runner_mod.run(
+        _empty_substrate(),
+        miner_config=_cfg(), verifier_config=_cfg(),
+        miner_client="m", verifier_client="v",
+        verifier_retry_cooldown_sec=0,
+        chat_fn=chat,
+    )
+    row = output["entrypoints"][0]
+    assert row["status"] == "kept"
+    fallback_used = [
+        c for c in report.verifier_calls
+        if c.get("fallback") == "dispatch_context"
+    ]
+    assert fallback_used, report.verifier_calls
+
+
 def test_verifier_retry_exhausted_keeps_synthetic_quarantine():
     """When all retry passes also fail, the synthetic verdict is
     preserved and quarantine_reason reflects the retry budget."""
