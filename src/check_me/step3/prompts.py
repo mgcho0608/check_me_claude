@@ -113,6 +113,48 @@ PART A — Path nodes.
   reasoning in ``uncertainty`` either way so a re-call can
   recover precision when the substrate added context.
 
+  IMPORTANT — sibling-function disambiguation.
+  When the neighborhood contains TWO OR MORE functions whose
+  names share a common prefix (e.g. ``foo``, ``foo_path``,
+  ``foo_fd`` — or any other ``<base>``, ``<base>_<suffix>``
+  cluster), do NOT default to the lexicographically first
+  match or to the most-frequently-mentioned sibling. The
+  substrate ``call_graph`` edges from the entry, the
+  ``data_control_flow`` def_use rows, and the verifier prose
+  on the entry candidate tell you which specific sibling the
+  chain enters. If the substrate / verifier prose names one
+  sibling, that one is the chain target — the others appear
+  in the neighborhood only because the retrieval walks call
+  graphs by name. When the substrate is silent on which
+  sibling, prefer the one whose BODY is in the source
+  excerpts AND whose body contains the substrate-cited
+  ``guards`` / ``data_control_flow`` rows; the others are
+  almost always look-alikes that share an interface, not the
+  vulnerable frame. Note this reasoning in ``uncertainty``
+  so a deeper retrieval call can correct a wrong pick.
+  Project-agnostic: the rule is anchored on substrate row
+  presence + source body availability, not on a specific
+  symbol or naming scheme.
+
+  IMPORTANT — same-function line drift inside callee bodies.
+  Once you have decided which callee body to anchor the sink
+  in, the body may itself contain MULTIPLE suspicious lines
+  (e.g. a ``memcmp`` at one offset and a ``memcpy`` at
+  another, or a ``hmac_finish`` after a ``safer_memcmp``
+  earlier in the same function). Prefer the line where the
+  substrate's ``guards`` row, the verifier's
+  ``attacker_controllability`` prose, or an
+  ``evidence_anchor`` note positively names the buggy
+  primitive over the FIRST suspicious-looking line the body
+  exposes. When several lines are equally plausible, emit
+  ALL of them as separate ``sink`` nodes (the schema permits
+  multiple sinks per path) — that is honest about a
+  multi-sink CVE class rather than force-collapsing into a
+  single arbitrary pick. Cite each chosen sink line's
+  buggy-primitive evidence in ``evidence_anchors``. Same
+  project-agnostic anchor: substrate / verifier prose /
+  evidence anchors, not a specific symbol or CVE pattern.
+
   CRITICAL — sink role REQUIRES a real harmful-operation line.
   A node with ``role: "sink"`` MUST have a non-zero, non-null
   ``line`` field that points to the EXACT source line where the

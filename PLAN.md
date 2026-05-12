@@ -914,6 +914,28 @@ Step 3 (`src/check_me/step3/`):
   failure mode where ``tcp_request:1700`` was selected as sink
   instead of walking the deeper ``answer_request →
   add_resource_record`` chain.
+- **Sibling-function disambiguation** (Part A). When the
+  neighborhood contains a name-prefix cluster (``foo``,
+  ``foo_path``, ``foo_fd`` shape), the LLM is told not to
+  default to the lexicographically first or most-frequently-
+  mentioned sibling — pick the one the substrate
+  ``call_graph`` / ``data_control_flow`` / verifier prose
+  positively names, or the one whose body is in the excerpts
+  AND contains the substrate-cited guards / def_use rows.
+  Project-agnostic. Closes the sudo-style mis-pick where
+  ``set_cmnd_path`` / ``set_cmnd_fd`` are easier to reach
+  than the true vulnerable ``set_cmnd``.
+- **Same-function multi-line drift caveat** (Part A). Inside
+  the chosen callee body the LLM is told to prefer the line
+  the substrate / verifier / evidence_anchor names as the
+  buggy primitive over the FIRST suspicious-looking line; when
+  several lines are equally plausible the schema permits
+  multiple ``sink`` nodes and the LLM should emit ALL of them
+  rather than force-collapse. Project-agnostic — anchored on
+  schema fields, not on specific buggy-primitive names.
+  Closes the mbedtls-style drift where the first encountered
+  ``safer_memcmp`` was selected instead of the
+  ``hmac_finish`` that the CVE actually patches.
 - **libclang warm-up** in the runner so the per-IR
   parallel synthesis workers don't race to materialise the
   libclang index. Single ``extract_excerpts(source_root, [])``
@@ -941,6 +963,42 @@ Step 4 (`src/check_me/step4/`):
   chains remain the canonical case (libssh CVE-2018-10933 spans
   3 IRs, woven within a single chunk or across chunks via the
   cross-chunk weaving rule).
+- **Chain-depth requirement.** A valid multi-step scenario
+  must reference at least two DISTINCT ``evidence_ir`` ids
+  across its ``exploit_chain.steps``. The single-IR exception
+  applies only when the IR's own path contains both the entry
+  and the sink (e.g. an entry function that IS the bug-bearing
+  frame). The "one IR, four identical ``order`` entries" shape
+  is explicitly rejected. Project-agnostic — anchored on the
+  schema-defined chain structure, no symbol-specific tuning.
+- **Anti-overgeneration guard.** Scenarios are exploit chains,
+  not enumerated sinks. The prompt requires both
+  (i) the chain-depth requirement above AND
+  (ii) the entry side of the chain is a substrate-recognised
+  attack surface (``trust_boundaries.kind`` ∈
+  ``network_socket`` / ``external_io`` / ``ipc_endpoint``; a
+  ``callback`` / ``event`` / ``boot_phase`` trigger_type on
+  the entry IR; or a registered callback whose registration
+  sits behind an attacker-reachable dispatch). Candidates
+  failing both go into ``uncertainty`` rather than scenarios.
+  Closes the "152 scenarios for one CVE" over-generation
+  observed on sudo / libssh / dnsmasq when the prompt only
+  required "produce scenarios".
+- **Attacker-direction signal.** Each scenario's first step
+  must make the direction of attacker input explicit —
+  inbound (recv / read / packet_callback materialising
+  attacker bytes; anchored on
+  ``trust_boundaries.direction: untrusted_to_trusted``),
+  outbound (send / write / emit; attacker is the recipient
+  of bytes typically conditioned by a prior inbound
+  corruption), or local-attacker (CLI / setuid / direct API
+  invocation; anchored on ``cli_argument`` triggers or
+  ``command`` trigger_type IRs). The substrate's
+  trust_boundary direction and the cited function's call
+  site pin the role — a server-side handler exploit cannot
+  be described as a client-side one and vice versa. Closes
+  the libssh-style server / client confusion. Project-
+  agnostic — direction enum is schema-defined.
 - Tests: 7 step4 test cases (small fixtures use single-call
   path; chunked path exercised on real datasets).
 

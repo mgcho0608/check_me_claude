@@ -130,6 +130,77 @@ Hard constraints:
     The ``uncertainty`` field should note when you tried to
     weave and could not find a partner IR.
 
+  - **Chain-depth requirement.** A valid multi-step scenario
+    must reference at least TWO DISTINCT ``evidence_ir`` ids
+    across its ``exploit_chain.steps`` — that is what makes
+    it a multi-IR weave rather than the same IR re-numbered.
+    Exception: a single-IR scenario IS valid when the IR's
+    own path already contains the full entry → sink chain
+    (entry function IS the bug-bearing frame and the sink
+    node sits inside the same path). In that case the
+    scenario MUST be a SINGLE step whose ``action`` /
+    ``result`` describes the end-to-end chain. Any scenario
+    that has multiple steps must show multiple IR ids; any
+    scenario with one IR must have one step. Reject the
+    intermediate "one IR, four ``order`` entries" shape — it
+    is the failure mode this rule exists to catch.
+
+  - **Anti-overgeneration.** Do NOT enumerate every sink
+    candidate in the input as its own scenario. Scenarios
+    are exploit chains, not sinks. Output a scenario only
+    when:
+      (i)  it satisfies the chain-depth requirement above,
+           AND
+      (ii) the entry side of the chain is a substrate-
+           recognised attack surface (``trust_boundaries``
+           ``network_socket`` / ``external_io`` /
+           ``ipc_endpoint``; a ``callback`` /
+           ``event`` / ``boot_phase`` trigger_type on the
+           entry IR; or a registered callback whose
+           registration site sits behind an attacker-
+           reachable dispatch).
+    If neither condition holds, the candidate is a sink
+    without a reachable attacker — recordable in
+    ``uncertainty`` but not a scenario. The output's
+    ``attack_scenarios`` list should be conservatively
+    small: a typical CVE has 1-3 distinct exploit chains,
+    not dozens of near-identical ones. Many scenarios
+    sharing the same sink and differing only in cosmetic
+    re-phrasing of ``action`` / ``result`` are an over-
+    generation symptom — collapse them.
+
+  - **Attacker direction signal.** Every scenario's
+    ``exploit_chain.steps[0].action`` must make the
+    direction of attacker input explicit. The
+    substrate-grounded distinction:
+      - **Inbound** — attacker sends bytes that the
+        cited function consumes. Anchored by a
+        ``trust_boundaries`` row with
+        ``direction: untrusted_to_trusted`` on the entry
+        function, OR by source-level evidence of a recv /
+        read / accept / packet_callback that materialises
+        attacker bytes into the connection state the chain
+        then operates on.
+      - **Outbound** — attacker is the recipient; the cited
+        function emits bytes that downstream code (the
+        attacker) consumes. Anchored by send / write / emit
+        APIs. Outbound attack chains usually exploit a
+        prior inbound-conditioned state corruption.
+      - **Local-attacker** — attacker invokes the function
+        directly (CLI / setuid / API call) without a
+        network channel. Anchored by ``cli_argument``
+        triggers, ``argv``/``getopt`` substrate rows, or
+        a ``command`` trigger_type IR.
+    A scenario whose chain originates at a server-side
+    handler must NOT be described as a client-side
+    exploit and vice versa — the substrate's trust_boundary
+    direction and the cited function's call site (``recv``
+    vs ``send``, server-leg packet handler vs client-leg)
+    pin the role. When the substrate is genuinely
+    ambiguous, name the ambiguity in ``uncertainty`` and
+    pick the direction the cited evidence most strongly
+    supports.
+
   - ``exploit_chain.steps`` must have at least one step. Every
     step must include ``order``, ``evidence_ir`` (an IR id from
     the input), ``action`` (free text describing what the
